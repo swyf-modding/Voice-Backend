@@ -2,7 +2,6 @@ using System;
 using System.Collections;
 using System.Diagnostics;
 using System.IO;
-using System.Text;
 using BepInEx;
 using UnityEngine;
 
@@ -27,8 +26,6 @@ namespace ScamWYF.VoiceBackend
         private static Process _process;
         private static bool _startedByUs;
         private static bool _starting;
-        private static StreamWriter _log;
-        private static readonly object LogLock = new object();
         private static string _status = "not started";
 
         public static string Status
@@ -168,7 +165,6 @@ namespace ScamWYF.VoiceBackend
             if (!shouldStop)
             {
                 _status = "left running (StopServerOnExit is off)";
-                CloseLog();
                 _process = null;
                 _startedByUs = false;
                 return;
@@ -197,17 +193,6 @@ namespace ScamWYF.VoiceBackend
 
             _startedByUs = false;
             _status = "stopped";
-            CloseLog();
-        }
-
-        private static void CloseLog()
-        {
-            lock (LogLock)
-            {
-                try { if (_log != null) _log.Dispose(); }
-                catch (Exception) { }
-                _log = null;
-            }
         }
 
         // ---------------------------------------------------------------- starting
@@ -220,35 +205,22 @@ namespace ScamWYF.VoiceBackend
                 FileName = executable,
                 WorkingDirectory = directory,
                 UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
+                CreateNoWindow = true
             };
 
             var uri = new Uri(Plugin.Cfg.BaseUrl.Value.Trim());
             info.EnvironmentVariables["VOICE_HOST"] = "127.0.0.1";
             info.EnvironmentVariables["VOICE_PORT"] = uri.Port.ToString();
+            info.EnvironmentVariables["VOICE_DEVICE_MODE"] = Plugin.Cfg.Mode.Value.ToString().ToLowerInvariant();
+            info.EnvironmentVariables["VOICE_LOG_FILE"] = LogPath();
             info.EnvironmentVariables["PYTHONUTF8"] = "1";
             info.EnvironmentVariables["PYTHONUNBUFFERED"] = "1";
             info.EnvironmentVariables["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1";
             info.EnvironmentVariables["TOKENIZERS_PARALLELISM"] = "false";
             info.EnvironmentVariables["TQDM_DISABLE"] = "1";
 
-            OpenLog();
-
             var process = new Process { StartInfo = info };
-            process.OutputDataReceived += delegate (object sender, DataReceivedEventArgs e)
-            {
-                if (e.Data != null) WriteLog("out", e.Data);
-            };
-            process.ErrorDataReceived += delegate (object sender, DataReceivedEventArgs e)
-            {
-                if (e.Data != null) WriteLog("err", e.Data);
-            };
-
             process.Start();
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
 
             _process = process;
             _startedByUs = true;
@@ -329,7 +301,7 @@ namespace ScamWYF.VoiceBackend
         private static int ProbeTimeout()
         {
             try { return Plugin.Cfg.ServerStartTimeoutSeconds.Value; }
-            catch (Exception) { return 120; }
+            catch (Exception) { return 300; }
         }
 
         private static bool IsLoopback(string url)
@@ -351,35 +323,6 @@ namespace ScamWYF.VoiceBackend
         private static string LogPath()
         {
             return Path.Combine(Paths.BepInExRootPath, "VoiceBackend.Server.log");
-        }
-
-        private static void OpenLog()
-        {
-            lock (LogLock)
-            {
-                try
-                {
-                    _log = new StreamWriter(LogPath(), false, new UTF8Encoding(false));
-                    _log.AutoFlush = true;
-                    _log.WriteLine("[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
-                                   "] voice backend server starting");
-                }
-                catch (Exception ex)
-                {
-                    _log = null;
-                    Plugin.Log.LogWarning("Could not write " + LogPath() + ": " + ex.Message);
-                }
-            }
-        }
-
-        private static void WriteLog(string stream, string line)
-        {
-            lock (LogLock)
-            {
-                if (_log == null) return;
-                try { _log.WriteLine("[" + stream + "] " + line); }
-                catch (Exception) { }
-            }
         }
 
         private static string SafeExitCode()

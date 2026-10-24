@@ -139,9 +139,10 @@ that path.
   vendored in `vendor/` here so the repository builds out of the box.
 - The release includes a **self-contained server executable**. Python is only needed if you build
   that server from source; a player installing the mod does not install Python or `uv`.
-- Disk for the server and the models: the bundled server folder is about **1.7 GB**, and the models
-  are downloaded on first use — two Parakeet checkpoints (~700 MB each) and one or both Chatterbox
-  checkpoints (~1.5 GB each).
+- Disk for the server and the models: the CPU server folder is about **1.7 GB**; a CUDA build is
+  about **7.5 GB** because it carries both torch's CUDA 12 runtime and ONNX Runtime's CUDA 13
+  libraries. The models are downloaded on first use — two Parakeet checkpoints (~700 MB each) and
+  one or both Chatterbox checkpoints (~1.5 GB each).
 - An NVIDIA GPU is optional. Parakeet is comfortable on CPU in int8; Chatterbox is much faster on a
   GPU and is the part where a CPU-only machine feels slow.
 
@@ -208,6 +209,30 @@ uv sync --extra tts
 
 The mod leaves an already-running server alone, so either workflow is fine.
 
+### GPU or CPU: `Mode`
+
+`Mode` decides where inference runs. The default is `Gpu`:
+
+| Value | Behaviour |
+|---|---|
+| `Gpu` | Prefer the GPU. Chatterbox uses CUDA/ROCm (`cuda` in torch), Intel XPU, or Apple MPS. Parakeet uses TensorRT/CUDA/ROCm/DirectML/OpenVINO/CoreML/WebGPU if the ONNX Runtime has one. If nothing usable is present, the server logs a warning and runs on CPU. |
+| `Auto` | Same as `Gpu`, but a CPU fallback is silent. |
+| `Cpu` | Force CPU for both models. |
+
+The hardware is detected at runtime, not at build time, so `Mode = Gpu` is the only setting a player
+normally changes. The **server binary itself** has to contain the matching runtime:
+
+| Build | Hardware |
+|---|---|
+| `-Backend cuda` | NVIDIA CUDA 12/13, with CPU fallback. ~7.5 GB. |
+| `-Backend rocm` | AMD ROCm on Linux. |
+| `-Backend directml` | Windows DirectML for Parakeet; Chatterbox stays CPU. |
+| `-Backend cpu` | CPU only, smallest (~1.7 GB). |
+| `-Backend auto` | Detects the build machine's GPU and picks one of the above. |
+
+The menu's **Check server** button shows the selected torch device, backend and ONNX providers from
+`/health`, which is the quickest way to confirm that `Gpu` really selected the GPU.
+
 ### Configure the mod
 
 Launch the game once. BepInEx writes
@@ -223,6 +248,7 @@ Enabled = true
 
 [2 - Server]
 BaseUrl = http://127.0.0.1:8010
+Mode = Gpu
 WarmupOnLoad = true
 AutoStartServer = true
 StopServerOnExit = true
@@ -285,6 +311,7 @@ callers) gets the fast model and other languages still sound like the language t
 | Key | Default | Meaning |
 |---|---|---|
 | `BaseUrl` | `http://127.0.0.1:8010` | Server root. `AsrPath` and `TtsPath` are appended. |
+| `Mode` | `Gpu` | `Gpu` prefers CUDA/ROCm/XPU/MPS and falls back to CPU; `Auto` does the same without warning; `Cpu` forces CPU. |
 | `AsrPath` | `/asr` | Speech-recognition endpoint. |
 | `TtsPath` | `/tts` | Text-to-speech endpoint. |
 | `ApiKey` | *(empty)* | Sent as `Authorization: Bearer`. Stored in plain text. |
@@ -293,7 +320,7 @@ callers) gets the fast model and other languages still sound like the language t
 | `WarmupOnLoad` | `true` | Ask the server to load its models at game start. |
 | `AutoStartServer` | `true` | Launch `VoiceBackend.Server.exe` if nothing is listening. |
 | `ServerExecutable` | *(empty)* | Explicit server path. Empty searches `BepInEx/plugins/VoiceBackend`, `BepInEx/plugins`, the game root and nearby folders. |
-| `ServerStartTimeoutSeconds` | `120` | How long to wait for the auto-started server to answer `/health`. |
+| `ServerStartTimeoutSeconds` | `300` | How long to wait for the auto-started server to answer `/health`. A cold CUDA bundle can take a while on the first launch. |
 | `StopServerOnExit` | `true` | Stop the server on game exit, but only if this mod started it. |
 
 ### Speech recognition

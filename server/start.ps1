@@ -11,7 +11,9 @@
 param(
     [switch]$NoTts,
     [int]$Port = 8010,
-    [string]$HostName = "127.0.0.1"
+    [string]$HostName = "127.0.0.1",
+    [ValidateSet("auto", "cpu", "gpu")]
+    [string]$Mode = "auto"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,6 +24,7 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 
 $env:VOICE_PORT = "$Port"
 $env:VOICE_HOST = $HostName
+$env:VOICE_DEVICE_MODE = $Mode
 if ($NoTts) { $env:VOICE_TTS = "0" }
 
 Push-Location $PSScriptRoot

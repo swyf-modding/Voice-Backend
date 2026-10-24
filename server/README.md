@@ -32,16 +32,42 @@ of this server.
 ## Build the standalone server
 
 ```powershell
-./build-server.ps1              # server/dist/VoiceBackend.Server/
-./build-server.ps1 -Install     # ...and copy it into BepInEx/plugins/VoiceBackend/
+./build-server.ps1              # detect the build machine's backend
+./build-server.ps1 -Backend cuda # NVIDIA CUDA 12/13 + CPU fallback
+./build-server.ps1 -Backend rocm # AMD ROCm (Linux)
+./build-server.ps1 -Backend directml # Windows DirectML for Parakeet, CPU Chatterbox
+./build-server.ps1 -Backend cpu  # smallest
+./build-server.ps1 -Install     # also copy into BepInEx/plugins/VoiceBackend/
 ```
 
-PyInstaller bundles Python, onnxruntime, torch and the Chatterbox package into a one-folder
-application. The result is about **1.7 GB** and needs no Python on the target machine. Model weights
-are still downloaded on first use.
+PyInstaller bundles Python, the selected runtime and the Chatterbox package into a one-folder
+application. The CPU build is about **1.7 GB**; a CUDA build is about **7.5 GB** because it carries
+both torch's CUDA 12 runtime and ONNX Runtime's CUDA 13 libraries. Model weights are downloaded on
+first use.
 
-The release layout puts that folder at `BepInEx/plugins/VoiceBackend/`, one level below the plugin
+The release layout puts the folder at `BepInEx/plugins/VoiceBackend/`, one level below the plugin
 scan. `ServerLauncher` finds it there and starts it with the game. See [`../RELEASING.md`](../RELEASING.md).
+
+## Device mode
+
+The mod passes `VOICE_DEVICE_MODE` from its `Mode` setting:
+
+| Mode | Effect |
+|---|---|
+| `gpu` | Chatterbox: CUDA, ROCm (reported by torch as `cuda`), Intel XPU, or Apple MPS. Parakeet: CUDA, ROCm, DirectML, OpenVINO, CoreML, WebGPU or MIGraphX if available. Falls back to CPU with a warning. |
+| `auto` | Same, without the warning on fallback. |
+| `cpu` | Force CPU for both. |
+
+`GET /health` reports `device.mode`, `device.torch`, `device.torch_backend`,
+`device.onnx_requested` and `device.onnx_active`, plus the same information under `asr` and `tts`.
+That is the source of truth for which path is actually running.
+
+A CUDA build works on a machine without NVIDIA too: torch reports no CUDA device, ONNX Runtime has
+no usable GPU provider, and the server runs on CPU. It is just a large download for that machine.
+
+The environment variable `PARAKEET_PROVIDERS` can override the ONNX provider list, e.g.
+`PARAKEET_PROVIDERS=TensorrtExecutionProvider,CPUExecutionProvider` after installing TensorRT.
+`CHATTERBOX_DEVICE=cpu` or `cuda` overrides torch's device for one run.
 
 ## Install and run from source
 

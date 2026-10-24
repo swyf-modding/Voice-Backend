@@ -34,12 +34,24 @@ namespace ScamWYF.VoiceBackend
         Multilingual
     }
 
+    /// <summary>Where the companion server runs inference.</summary>
+    public enum DeviceMode
+    {
+        /// <summary>GPU when the runtime sees one, CPU otherwise.</summary>
+        Auto,
+        /// <summary>Force CPU.</summary>
+        Cpu,
+        /// <summary>Prefer CUDA, ROCm, XPU or MPS; fall back to CPU with a warning if none is usable.</summary>
+        Gpu
+    }
+
     internal sealed class Config
     {
         public readonly ConfigEntry<bool> Enabled;
         public readonly ConfigEntry<bool> Debug;
 
         public readonly ConfigEntry<string> BaseUrl;
+        public readonly ConfigEntry<DeviceMode> Mode;
         public readonly ConfigEntry<string> AsrPath;
         public readonly ConfigEntry<string> TtsPath;
         public readonly ConfigEntry<string> ApiKey;
@@ -78,6 +90,16 @@ namespace ScamWYF.VoiceBackend
                 "endpoints). No trailing slash and no endpoint path: AsrPath and TtsPath are appended.\n" +
                 "Example: http://127.0.0.1:8010");
 
+            Mode = settings.BindChoice("2 - Server", "Mode", DeviceMode.Gpu,
+                new[] { DeviceMode.Auto, DeviceMode.Cpu, DeviceMode.Gpu },
+                "Where the server runs inference.\n" +
+                "Gpu  = prefer the GPU: CUDA or ROCm (both reported by torch as cuda), Intel XPU, or\n" +
+                "       Apple MPS for Chatterbox; TensorRT/CUDA/ROCm/DirectML/OpenVINO/CoreML/WebGPU\n" +
+                "       for Parakeet's ONNX Runtime. If the bundled runtime has no usable GPU\n" +
+                "       provider, the server logs a warning and falls back to CPU rather than failing.\n" +
+                "Auto = use a GPU when one is visible, otherwise CPU.\n" +
+                "Cpu  = force CPU.");
+
             AsrPath = settings.Bind("2 - Server", "AsrPath", "/asr",
                 "Speech-recognition endpoint, appended to BaseUrl. It receives a WAV body and returns\n" +
                 "{\"text\": \"...\", \"confidence\": 0.0}. The bundled server uses /asr.");
@@ -114,7 +136,7 @@ namespace ScamWYF.VoiceBackend
                 "Explicit path to VoiceBackend.Server.exe. Empty searches the usual places.\n" +
                 "A relative path is tried next to the plugins folder, then the game root.");
 
-            ServerStartTimeoutSeconds = settings.Bind("2 - Server", "ServerStartTimeoutSeconds", 120, 5, 600,
+            ServerStartTimeoutSeconds = settings.Bind("2 - Server", "ServerStartTimeoutSeconds", 300, 5, 900,
                 "How long to wait for the auto-started server to answer /health. The first launch of\n" +
                 "a bundled Python runtime can take a while on a cold disk.");
 
@@ -218,7 +240,7 @@ namespace ScamWYF.VoiceBackend
         {
             Clamp(AsrTimeoutSeconds, settings.Int(AsrTimeoutSeconds, 1, 120));
             Clamp(TtsTimeoutSeconds, settings.Int(TtsTimeoutSeconds, 1, 600));
-            Clamp(ServerStartTimeoutSeconds, settings.Int(ServerStartTimeoutSeconds, 5, 600));
+            Clamp(ServerStartTimeoutSeconds, settings.Int(ServerStartTimeoutSeconds, 5, 900));
 
             if (SkipPocketModel.Value && TtsFallbackToPocket.Value)
             {
@@ -250,7 +272,7 @@ namespace ScamWYF.VoiceBackend
             if (log == null) return;
 
             log.LogInfo(string.Format(
-                "In effect: server {0}, ASR {1} (English {2}, European {3}, other {4}), TTS {5} ({6}, " +
+                "In effect: server {0}, mode {8}, ASR {1} (English {2}, European {3}, other {4}), TTS {5} ({6}, " +
                 "skip Pocket model {7}).",
                 SafeUrl(),
                 AsrActive ? "Parakeet" : "off",
@@ -259,7 +281,8 @@ namespace ScamWYF.VoiceBackend
                 OtherLanguages.Value,
                 TtsActive ? "Chatterbox" : "off",
                 TtsModel.Value,
-                SkipPocketModel.Value ? "yes" : "no"));
+                SkipPocketModel.Value ? "yes" : "no",
+                Mode.Value));
         }
 
         private string SafeUrl()

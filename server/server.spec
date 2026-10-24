@@ -13,8 +13,9 @@ on first use; they are not part of the executable.
 import os
 import sys
 import importlib.metadata
+from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, copy_metadata
+from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs, copy_metadata
 
 packages = [
     "chatterbox",
@@ -51,6 +52,30 @@ for package in packages:
         hiddenimports += package_hidden
     except Exception as exc:  # a missing optional package should not stop the build
         print("collect_all(%s) skipped: %s" % (package, exc))
+
+# onnxruntime-gpu and torch load CUDA/cuDNN DLLs from package directories rather than from the
+# system. PyInstaller's hooks do not always carry the nvidia-* wheels, so add every DLL at the top
+# level of _internal where onnxruntime's loader and PyInstaller's PATH both see it.
+try:
+    import site
+    import sysconfig
+
+    candidates = [Path(sysconfig.get_paths()["purelib"]) / "nvidia"]
+    candidates += [Path(path) / "nvidia" for path in site.getsitepackages()]
+    nvidia_root = next((path for path in candidates if path.is_dir()), None)
+    if nvidia_root is None:
+        print("nvidia package directory not found; GPU builds may fall back to CPU.")
+    else:
+        for dll in nvidia_root.rglob("*.dll"):
+            binaries.append((str(dll), "."))
+        print("Collected nvidia DLLs from %s" % nvidia_root)
+except Exception as exc:
+    print("nvidia DLL collection skipped: %s" % exc)
+
+try:
+    binaries += collect_dynamic_libs("onnxruntime")
+except Exception as exc:
+    print("onnxruntime DLL collection skipped: %s" % exc)
 
 hiddenimports += [
     "app",

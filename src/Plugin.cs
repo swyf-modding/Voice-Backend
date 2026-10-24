@@ -3,6 +3,8 @@ using System.Collections;
 using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using ScamWYF.Modding.Core;
 using ScamWYF.Modding.Core.Ui;
 using UnityEngine.UIElements;
@@ -252,6 +254,7 @@ namespace ScamWYF.VoiceBackend
             var scroll = page;
 
             Widgets.FieldRow(scroll, "Server", SafeUrl());
+            Widgets.FieldRow(scroll, "Device mode", Cfg.Mode.Value.ToString());
             Widgets.FieldRow(scroll, "Server check", _health);
             Widgets.FieldRow(scroll, "Server process", ServerLauncher.Status);
 
@@ -367,8 +370,28 @@ namespace ScamWYF.VoiceBackend
 
             if (result != null && result.Ok && !string.IsNullOrEmpty(result.Text))
             {
-                var text = result.Text.Replace("\r", " ").Replace("\n", " ");
-                _health = text.Length > 160 ? text.Substring(0, 160) + "..." : text;
+                try
+                {
+                    var health = JObject.Parse(result.Text);
+                    var device = health["device"] as JObject;
+                    if (device != null)
+                    {
+                        _health = string.Format("torch={0} ({1}), asr={2}",
+                            device["torch"],
+                            device["torch_backend"],
+                            device["onnx_active"] != null
+                                ? device["onnx_active"].ToString(Formatting.None)
+                                : "?");
+                    }
+                    else
+                    {
+                        _health = Shorten(result.Text, 160);
+                    }
+                }
+                catch (Exception)
+                {
+                    _health = Shorten(result.Text, 160);
+                }
                 ModLog.LogInfo("Voice backend health: " + result.Text);
             }
             else
@@ -391,6 +414,13 @@ namespace ScamWYF.VoiceBackend
             {
                 return "unreadable: " + ex.Message;
             }
+        }
+
+        private static string Shorten(string text, int max)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            var oneLine = text.Replace("\r", " ").Replace("\n", " ");
+            return oneLine.Length <= max ? oneLine : oneLine.Substring(0, max) + "...";
         }
     }
 }

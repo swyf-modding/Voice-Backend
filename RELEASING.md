@@ -27,13 +27,23 @@ The server is deliberately one folder below `plugins`: BepInEx scans only the to
 ## Build
 
 ```powershell
-./server/build-server.ps1 -Clean
+./server/build-server.ps1 -Backend auto -Clean
 ./build.ps1 -Version 0.2.0 -NoCopy
 ```
 
-`build-server.ps1` runs PyInstaller and produces `server/dist/VoiceBackend.Server/`. The result is
-about 1.7 GB and needs no Python on the target machine. The model weights are **not** included; the
-server downloads them on first use.
+`build-server.ps1` runs PyInstaller and produces `server/dist/VoiceBackend.Server/`. It needs no
+Python on the target machine, and the model weights are **not** included; the server downloads them
+on first use.
+
+| `-Backend` | Result | Uncompressed |
+|---|---|---|
+| `cpu` | CPU only | ~1.7 GB |
+| `cuda` | NVIDIA CUDA, CPU fallback | ~7.5 GB |
+| `rocm` | AMD ROCm on Linux | depends on wheel |
+| `directml` | Windows DirectML ASR; Chatterbox CPU | ~2 GB |
+
+The runtime picks the device from the mod's `Mode`; a CUDA build also runs on CPU when no NVIDIA GPU
+is visible. Publish the backend matching the audience, or publish CPU and CUDA as separate assets.
 
 ## Package
 
@@ -49,14 +59,16 @@ Copy-Item -Recurse -Force "server/dist/VoiceBackend.Server" "$stage/plugins/Voic
 7z a -tzip -mx=5 "release/Voice-Backend-0.2.0.zip" "release/BepInEx/*"
 ```
 
-A GitHub release asset has a 2 GB limit per file. The server folder is 1.68 GB uncompressed and
-zips smaller than that; keep the release to one zip. If a host has a tighter limit, split the zip
-with 7-Zip volumes and document the extra step, or publish the server folder as a separate asset.
+A GitHub release asset has a 2 GB limit per file. The CPU server folder (1.68 GB) zips smaller than
+that and fits in one asset. The CUDA folder is too large for one asset: publish it as split 7-Zip
+volumes, as a separate download, or keep the CPU build as the fallback and document the GPU asset
+separately.
 
 ## Checklist
 
 - [ ] `./build.ps1 -NoCopy -Test` passes.
 - [ ] The tag is on the commit that produced the DLL; `build.ps1` stamps the version from it.
 - [ ] `VoiceBackend.Server.exe` starts and `/health` responds on a machine without Python.
+- [ ] `/health` reports the intended `device.torch` and `device.onnx_active` for `Mode = Gpu`.
 - [ ] The zip contains `BepInEx/plugins/VoiceBackend/VoiceBackend.Server.exe` and its `_internal`.
 - [ ] No model files and no `.venv` are in the zip.

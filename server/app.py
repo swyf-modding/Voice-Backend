@@ -34,6 +34,25 @@ ASR_SAMPLE_RATE = 16_000
 PARAKEET_V2 = "nemo-parakeet-tdt-0.6b-v2"
 PARAKEET_V3 = "nemo-parakeet-tdt-0.6b-v3"
 
+DEVICE_MODE = os.environ.get("VOICE_DEVICE_MODE", "auto").strip().lower()
+if DEVICE_MODE not in ("auto", "cpu", "gpu"):
+    DEVICE_MODE = "auto"
+
+# In priority order. A build only has the providers its onnxruntime wheel was compiled with;
+# onnxruntime-gpu has CUDA, onnxruntime-rocm has ROCm, onnxruntime-directml has DML.
+# TensorRT is deliberately not in the default list: onnxruntime-gpu advertises it even without the
+# TensorRT libraries, and selecting it produces a long EP error before falling back. Set
+# PARAKEET_PROVIDERS=TensorrtExecutionProvider,CPUExecutionProvider after installing TensorRT.
+ONNX_GPU_PROVIDERS = [
+    "CUDAExecutionProvider",
+    "ROCMExecutionProvider",
+    "DmlExecutionProvider",
+    "OpenVINOExecutionProvider",
+    "CoreMLExecutionProvider",
+    "WebGpuExecutionProvider",
+    "MIGraphXExecutionProvider",
+]
+
 # Tags Chatterbox Turbo treats as paralinguistic. Anything else in [brackets] is a game tag
 # (pauses, transcript markup) and is removed before the model sees it.
 SPOKEN_TAGS = re.compile(
@@ -57,6 +76,9 @@ class AsrEngine:
         self._models: Dict[str, object] = {}
         self._locks = {"v2": threading.Lock(), "v3": threading.Lock()}
         self._load_lock = threading.Lock()
+        self._active_providers: List[str] = ["CPUExecutionProvider"]
+        self._available_providers: Optional[List[str]] = None
+        self._warned_no_gpu = False
 
     @property
     def quantization(self) -> Optional[str]:
@@ -64,11 +86,52 @@ class AsrEngine:
         return None if value in ("", "none", "off", "fp32") else value
 
     @property
-    def providers(self) -> Optional[List[str]]:
+    def available_providers(self) -> List[str]:
+        if self._available_providers is None:
+            try:
+                import onnxruntime as ort
+
+                self._available_providers = list(ort.get_available_providers())
+            except Exception:
+                LOG.warning("Could not query ONNX Runtime providers", exc_info=True)
+                self._available_providers = ["CPUExecutionProvider"]
+        return self._available_providers
+
+    @property
+    def providers(self) -> List[str]:
         raw = os.environ.get("PARAKEET_PROVIDERS", "").strip()
-        if not raw:
-            return None
-        return [part.strip() for part in raw.split(",") if part.strip()]
+        if raw:
+            requested = [part.strip() for part in raw.split(",") if part.strip()]
+            return self._with_cpu(requested)
+
+        if DEVICE_MODE == "cpu":
+            return ["CPUExecutionProvider"]
+
+        available = self.available_providers
+        chosen = [provider for provider in ONNX_GPU_PROVIDERS if provider in available]
+        if not chosen:
+            if DEVICE_MODE == "gpu" and not self._warned_no_gpu:
+                self._warned_no_gpu = True
+                LOG.warning(
+                    "Mode=gpu but this ONNX Runtime has no GPU provider (available: %s); "
+                    "Parakeet will run on CPU.",
+                    ", ".join(available),
+                )
+            return ["CPUExecutionProvider"]
+        return self._with_cpu(chosen)
+
+    @property
+    def active_providers(self) -> List[str]:
+        return list(self._active_providers)
+
+    def _with_cpu(self, providers: List[str]) -> List[str]:
+        output = []
+        for provider in providers:
+            if provider not in output:
+                output.append(provider)
+        if "CPUExecutionProvider" not in output:
+            output.append("CPUExecutionProvider")
+        return output
 
     def loaded(self) -> List[str]:
         return sorted(self._models)
@@ -85,13 +148,31 @@ class AsrEngine:
 
             name = PARAKEET_V2 if model_key == "v2" else PARAKEET_V3
             started = time.time()
-            LOG.info("Loading %s (quantization=%s)…", name, self.quantization or "fp32")
+            providers = self.providers
+            LOG.info(
+                "Loading %s (quantization=%s, providers=%s)…",
+                name,
+                self.quantization or "fp32",
+                ", ".join(providers),
+            )
             kwargs = {}
             if self.quantization:
                 kwargs["quantization"] = self.quantization
-            if self.providers:
-                kwargs["providers"] = self.providers
-            model = onnx_asr.load_model(name, **kwargs)
+
+            try:
+                model = onnx_asr.load_model(name, providers=providers, **kwargs)
+                self._active_providers = providers
+            except Exception as exc:
+                if providers == ["CPUExecutionProvider"]:
+                    raise
+                LOG.warning(
+                    "Parakeet could not start with %s (%s); retrying on CPU.",
+                    ", ".join(providers),
+                    exc,
+                )
+                model = onnx_asr.load_model(name, providers=["CPUExecutionProvider"], **kwargs)
+                self._active_providers = ["CPUExecutionProvider"]
+
             self._models[model_key] = model
             LOG.info("%s loaded in %.1fs", name, time.time() - started)
             return model
@@ -183,29 +264,68 @@ class TtsEngine:
         if self._device:
             return self._device
 
-        requested = os.environ.get("CHATTERBOX_DEVICE", "auto").strip().lower()
-        if requested and requested != "auto":
-            self._device = requested
+        explicit = os.environ.get("CHATTERBOX_DEVICE", "").strip().lower()
+        if explicit and explicit != "auto":
+            self._device = explicit
+            return self._device
+
+        if DEVICE_MODE == "cpu":
+            self._device = "cpu"
             return self._device
 
         try:
             import torch
 
             if torch.cuda.is_available():
-                self._device = "cuda"
+                self._device = "cuda"       # CUDA on NVIDIA, HIP/ROCm on AMD
+            elif hasattr(torch, "xpu") and torch.xpu.is_available():
+                self._device = "xpu"        # Intel XPU
             elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
-                self._device = "mps"
+                self._device = "mps"        # Apple Silicon
             else:
                 self._device = "cpu"
         except Exception:
+            LOG.warning("Could not query torch accelerators", exc_info=True)
             self._device = "cpu"
+
+        if DEVICE_MODE == "gpu" and self._device == "cpu":
+            LOG.warning(
+                "Mode=gpu but this torch build sees no CUDA/ROCm/XPU/MPS device; "
+                "Chatterbox will run on CPU."
+            )
         return self._device
+
+    @property
+    def backend(self) -> str:
+        device = self.device
+        if device == "cuda":
+            try:
+                import torch
+
+                return "rocm" if getattr(torch.version, "hip", None) else "cuda"
+            except Exception:
+                return "cuda"
+        return device
 
     def choose(self, requested: str, language: str) -> str:
         requested = (requested or os.environ.get("CHATTERBOX_MODEL", "auto")).strip().lower()
         if requested in ("turbo", "multilingual"):
             return requested
         return "turbo" if language.split("-")[0].lower() == "en" else "multilingual"
+
+    def _from_pretrained(self, kind: str, device: str):
+        if kind == "turbo":
+            from chatterbox.tts_turbo import ChatterboxTurboTTS
+
+            return ChatterboxTurboTTS.from_pretrained(device=device)
+
+        from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+
+        try:
+            return ChatterboxMultilingualTTS.from_pretrained(device=device, t3_model="v3")
+        except TypeError:
+            # Older packages do not have the v3 selector.
+            return ChatterboxMultilingualTTS.from_pretrained(device=device)
 
     def _load(self, kind: str):
         kind = kind.lower()
@@ -219,22 +339,19 @@ class TtsEngine:
                 )
 
             started = time.time()
-            LOG.info("Loading Chatterbox %s on %s…", kind, self.device)
+            device = self.device
+            LOG.info("Loading Chatterbox %s on %s…", kind, device)
 
-            if kind == "turbo":
-                from chatterbox.tts_turbo import ChatterboxTurboTTS
-
-                model = ChatterboxTurboTTS.from_pretrained(device=self.device)
-            else:
-                from chatterbox.mtl_tts import ChatterboxMultilingualTTS
-
-                try:
-                    model = ChatterboxMultilingualTTS.from_pretrained(
-                        device=self.device, t3_model="v3"
-                    )
-                except TypeError:
-                    # Older packages do not have the v3 selector.
-                    model = ChatterboxMultilingualTTS.from_pretrained(device=self.device)
+            try:
+                model = self._from_pretrained(kind, device)
+            except Exception:
+                if device == "cpu":
+                    raise
+                LOG.warning(
+                    "Chatterbox could not load on %s; retrying on CPU.", device, exc_info=True
+                )
+                self._device = "cpu"
+                model = self._from_pretrained(kind, "cpu")
 
             self._models[kind] = model
             LOG.info("Chatterbox %s loaded in %.1fs", kind, time.time() - started)
@@ -448,16 +565,27 @@ def health() -> dict:
     return {
         "ok": True,
         "service": "scamwyf-voice-backend",
+        "device": {
+            "mode": DEVICE_MODE,
+            "torch": tts.device,
+            "torch_backend": tts.backend,
+            "onnx_active": asr.active_providers,
+            "onnx_requested": asr.providers,
+            "onnx_available": asr.available_providers,
+        },
         "asr": {
             "loaded": asr.loaded(),
             "quantization": asr.quantization or "fp32",
-            "providers": asr.providers or ["default"],
+            "providers": asr.active_providers,
+            "requested_providers": asr.providers,
+            "available_providers": asr.available_providers,
             "models": {"v2": PARAKEET_V2, "v3": PARAKEET_V3},
         },
         "tts": {
             "installed": tts.installed(),
             "loaded": tts.loaded(),
             "device": tts.device,
+            "backend": tts.backend,
             "model": os.environ.get("CHATTERBOX_MODEL", "auto"),
         },
     }
@@ -536,14 +664,40 @@ def warmup(
 def main() -> None:
     import uvicorn
 
+    handlers = []
+    log_file = os.environ.get("VOICE_LOG_FILE", "").strip()
+    if log_file:
+        try:
+            Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+            handlers.append(logging.FileHandler(log_file, mode="w", encoding="utf-8"))
+        except Exception:
+            # Fall back to the console below.
+            pass
+    if not handlers:
+        handlers.append(logging.StreamHandler())
+
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        handlers=handlers,
     )
     host = os.environ.get("VOICE_HOST", "127.0.0.1")
     port = int(os.environ.get("VOICE_PORT", "8010"))
+    LOG.info(
+        "Device mode=%s torch=%s (%s) onnx=%s",
+        DEVICE_MODE,
+        tts.device,
+        tts.backend,
+        ", ".join(asr.providers),
+    )
     LOG.info("Listening on http://%s:%d", host, port)
-    uvicorn.run(app, host=host, port=port, log_level=os.environ.get("LOG_LEVEL", "info").lower())
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level=os.environ.get("LOG_LEVEL", "info").lower(),
+        log_config=None,
+    )
 
 
 if __name__ == "__main__":
