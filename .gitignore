@@ -5,5 +5,7 @@ vendor/ScamWYF.Modding.Core/obj/
 server/.venv/
 server/__pycache__/
 server/models/
+server/build/
+server/dist/
 *.user
 *.suo

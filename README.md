@@ -57,7 +57,7 @@ Friends.
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Install the mod](#install-the-mod)
-  - [Start the server](#start-the-server)
+  - [The server is started for you](#the-server-is-started-for-you)
   - [Configure the mod](#configure-the-mod)
 - [Language Coverage](#language-coverage)
 - [Configuration Reference](#configuration-reference)
@@ -137,10 +137,11 @@ that path.
   BepInEx cannot start without.
 - [ScamWYF.Modding.Core](https://github.com/swyf-modding/mod-lib), which owns the shared menu. It is
   vendored in `vendor/` here so the repository builds out of the box.
-- [uv](https://docs.astral.sh/uv/) for the companion server. It downloads Python and the model
-  dependencies into `server/.venv`.
-- Disk for the models, downloaded on first use: two Parakeet checkpoints (~700 MB each) and one or
-  both Chatterbox checkpoints (~1.5 GB each).
+- The release includes a **self-contained server executable**. Python is only needed if you build
+  that server from source; a player installing the mod does not install Python or `uv`.
+- Disk for the server and the models: the bundled server folder is about **1.7 GB**, and the models
+  are downloaded on first use — two Parakeet checkpoints (~700 MB each) and one or both Chatterbox
+  checkpoints (~1.5 GB each).
 - An NVIDIA GPU is optional. Parakeet is comfortable on CPU in int8; Chatterbox is much faster on a
   GPU and is the part where a CPU-only machine feels slow.
 
@@ -159,12 +160,45 @@ installs:
 - `ScamWYF.VoiceBackend.dll` → `BepInEx/plugins`
 - `ScamWYF.Modding.Core.dll` → `BepInEx/core`
 
+A release zip also contains the self-contained server in `BepInEx/plugins/VoiceBackend/`. When
+building from source, create that folder once with `server/build-server.ps1 -Install`; `build.ps1`
+does not compile it.
+
 The library is deliberately **not** in `plugins`: BepInEx would try to load it as a plugin, and every
 mod embedding its own copy would give the game two menus and two hotkey tables.
 
 The game install is auto-detected, or set `SWYG_GAME_DIR` / pass `-GameDir`.
 
-### Start the server
+### The server is started for you
+
+A release puts the self-contained server in `BepInEx/plugins/VoiceBackend/`:
+
+```text
+BepInEx/plugins/
+|-- ScamWYF.VoiceBackend.dll
+`-- VoiceBackend/
+    |-- VoiceBackend.Server.exe
+    `-- _internal/...
+```
+
+On game start the mod checks `/health`. If nothing is listening, it launches
+`VoiceBackend.Server.exe`, waits for it to become healthy, and then asks it to warm its models. On a
+normal game exit it stops the server again — but only if the mod started it. A server you had
+already started yourself is never touched.
+
+The server's stdout/stderr goes to `BepInEx/VoiceBackend.Server.log`, which is the first place to
+look if it does not start. The menu's **Voice Backend** tab shows the process state and has
+**Start server** / **Stop server** buttons.
+
+There is nothing else to install or start for a normal player. Python, `uv` and `pip` are only for
+building the server from source:
+
+```powershell
+cd server
+./build-server.ps1 -Install
+```
+
+Running the Python server by hand is still useful while developing it:
 
 ```powershell
 cd server
@@ -172,17 +206,7 @@ uv sync --extra tts
 ./start.ps1
 ```
 
-The server listens on `127.0.0.1:8010`, which is the mod's default. On the first start the models
-are downloaded and loaded; `/health` shows what is ready. The mod asks the server to warm its
-models when the game starts (`WarmupOnLoad`), so the first caller does not pay for a cold load
-inside the game's 15-second recognition timeout.
-
-ASR only, without torch or Chatterbox:
-
-```powershell
-uv sync
-./start.ps1 -NoTts
-```
+The mod leaves an already-running server alone, so either workflow is fine.
 
 ### Configure the mod
 
@@ -200,6 +224,8 @@ Enabled = true
 [2 - Server]
 BaseUrl = http://127.0.0.1:8010
 WarmupOnLoad = true
+AutoStartServer = true
+StopServerOnExit = true
 
 [3 - Speech recognition]
 AsrEnabled = true
@@ -265,6 +291,10 @@ callers) gets the fast model and other languages still sound like the language t
 | `AsrTimeoutSeconds` | `10` | Per-request recognition timeout, below the game's 15 seconds. |
 | `TtsTimeoutSeconds` | `90` | Per-request synthesis timeout. CPU-only Chatterbox needs the headroom. |
 | `WarmupOnLoad` | `true` | Ask the server to load its models at game start. |
+| `AutoStartServer` | `true` | Launch `VoiceBackend.Server.exe` if nothing is listening. |
+| `ServerExecutable` | *(empty)* | Explicit server path. Empty searches `BepInEx/plugins/VoiceBackend`, `BepInEx/plugins`, the game root and nearby folders. |
+| `ServerStartTimeoutSeconds` | `120` | How long to wait for the auto-started server to answer `/health`. |
+| `StopServerOnExit` | `true` | Stop the server on game exit, but only if this mod started it. |
 
 ### Speech recognition
 
@@ -293,7 +323,14 @@ error verbatim, and a **Check server** button that reads `/health`.
 
 ## The Companion Server
 
-The server is described in [`server/README.md`](server/README.md). In short:
+The server is described in [`server/README.md`](server/README.md). It is a self-contained
+`VoiceBackend.Server.exe` built with PyInstaller: Python, torch, onnxruntime and the Chatterbox
+package are inside its folder. The mod starts it automatically, and its output goes to
+`BepInEx/VoiceBackend.Server.log`.
+
+The model weights are **not** in the executable. They are downloaded on first use into the Hugging
+Face cache, so the first English line on a fresh machine waits for Parakeet v2, and the first
+non-English line waits for the checkpoint it needs.
 
 | Endpoint | Purpose |
 |---|---|
@@ -369,8 +406,14 @@ both versions rather than assuming support.
   takes that long to start speaking.
 - **Windows ARM64 is not covered for recognition.** The game bypasses Whisper there and uses its
   own ARM speech worker; this mod patches the Whisper path.
-- **The first request downloads models.** `WarmupOnLoad` hides most of this if the server is running
-  before the game. A cold server plus a cold game means the first caller can still be slow.
+- **The first request downloads models.** The server is started automatically, but a fresh install
+  still downloads the selected checkpoints before the first answer. `WarmupOnLoad` starts that in
+  the background at game load; a cold server plus an immediate first caller can still be slow.
+- **The server folder is large.** It is about 1.7 GB because it contains Python, torch and the
+  Chatterbox runtime. The model weights are downloaded separately on first use. This is the cost of
+  not asking players to install Python.
+- **Auto-start is local only.** If `BaseUrl` points at another machine, the mod leaves it alone and
+  expects that machine to be running the server.
 - **Reference voices come from the game.** Chatterbox clones the WAV the game already uses for that
   caller. A custom/community voice that is not on disk where the server can read it will fall back to
   the server's default voice or no reference; `SendVoiceAudio = true` fixes the remote-server case.

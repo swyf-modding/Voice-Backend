@@ -65,6 +65,6 @@ if ($Test)      { $buildArgs.Test = $true }
 
 if (-not $NoCopy) {
     Write-Host ""
-    Write-Host "Launch the game once so BepInEx writes its config, then start the companion server" -ForegroundColor Green
-    Write-Host "  in server/ (see server/README.md) and set BaseUrl in BepInEx/config/com.community.scamwyf.voicebackend.cfg" -ForegroundColor Green
+    Write-Host "The mod starts the bundled server automatically." -ForegroundColor Green
+    Write-Host "If BepInEx/plugins/VoiceBackend is missing, build it with: server/build-server.ps1 -Install" -ForegroundColor Green
 }

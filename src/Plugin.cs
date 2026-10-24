@@ -72,8 +72,7 @@ namespace ScamWYF.VoiceBackend
             Cfg.Describe(ModLog);
             ApplyPatches();
 
-            if (Cfg.WarmupOnLoad.Value)
-                VoiceRuntime.Instance.StartCoroutine(Warmup());
+            VoiceRuntime.Instance.StartCoroutine(Bootstrap());
 
             if (!Cfg.AsrActive && !Cfg.TtsActive)
                 ModLog.LogInfo("Both replacements are off; the game is using its own Whisper and Pocket TTS.");
@@ -81,6 +80,7 @@ namespace ScamWYF.VoiceBackend
 
         protected override void OnModUnload()
         {
+            ServerLauncher.Stop();
             VoiceRuntime.Shutdown();
         }
 
@@ -196,6 +196,21 @@ namespace ScamWYF.VoiceBackend
                 _slowTranscriptPrefix);
         }
 
+        /// <summary>Bring the server up if needed, then warm its models.</summary>
+        private IEnumerator Bootstrap()
+        {
+            bool ready = false;
+            yield return ServerLauncher.EnsureStarted(delegate (bool ok, string message)
+            {
+                ready = ok;
+                if (ok) ModLog.LogInfo("Voice backend server: " + message);
+                else ModLog.LogWarning("Voice backend server: " + message);
+            });
+
+            if (ready && Cfg.WarmupOnLoad.Value) yield return Warmup();
+            ModMenu.Refresh();
+        }
+
         /// <summary>Load the models at game start so the first caller does not pay for it.</summary>
         private IEnumerator Warmup()
         {
@@ -238,6 +253,7 @@ namespace ScamWYF.VoiceBackend
 
             Widgets.FieldRow(scroll, "Server", SafeUrl());
             Widgets.FieldRow(scroll, "Server check", _health);
+            Widgets.FieldRow(scroll, "Server process", ServerLauncher.Status);
 
             Widgets.Spacer(scroll, 8f);
             Widgets.Heading(scroll, "Speech recognition");
@@ -295,6 +311,22 @@ namespace ScamWYF.VoiceBackend
                 _health = "checking...";
                 ModMenu.Refresh();
                 VoiceRuntime.Instance.StartCoroutine(CheckHealth());
+            });
+
+            Widgets.DescribedButton(row, "Start server", "Launch the bundled server now", delegate
+            {
+                VoiceRuntime.Instance.StartCoroutine(ServerLauncher.EnsureStarted(delegate (bool ok, string message)
+                {
+                    ModLog.LogInfo("Voice backend server: " + message);
+                    ModMenu.Refresh();
+                }));
+            });
+
+            Widgets.DescribedButton(row, "Stop server", "Stop a server this mod started", delegate
+            {
+                ServerLauncher.Stop(true);
+                ModLog.LogInfo("Voice backend server stopped from the menu.");
+                ModMenu.Refresh();
             });
 
             Widgets.DescribedButton(row, "Re-read config", "Reload the file now", delegate { ReloadConfig(); });

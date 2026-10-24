@@ -46,6 +46,10 @@ namespace ScamWYF.VoiceBackend
         public readonly ConfigEntry<int> AsrTimeoutSeconds;
         public readonly ConfigEntry<int> TtsTimeoutSeconds;
         public readonly ConfigEntry<bool> WarmupOnLoad;
+        public readonly ConfigEntry<bool> AutoStartServer;
+        public readonly ConfigEntry<string> ServerExecutable;
+        public readonly ConfigEntry<int> ServerStartTimeoutSeconds;
+        public readonly ConfigEntry<bool> StopServerOnExit;
 
         public readonly ConfigEntry<bool> AsrEnabled;
         public readonly ConfigEntry<ParakeetModel> EnglishModel;
@@ -99,6 +103,24 @@ namespace ScamWYF.VoiceBackend
                 "the game starts. The first model load can take minutes on a fresh install, and a\n" +
                 "first caller turn would otherwise hit the game's 15-second recognition timeout.\n" +
                 "Harmless when the server is not running: the failure is logged, not raised.");
+
+            AutoStartServer = settings.Bind("2 - Server", "AutoStartServer", true,
+                "Start the companion server with the game if it is not already running.\n" +
+                "The server is looked for at BepInEx/plugins/VoiceBackend/VoiceBackend.Server.exe,\n" +
+                "then a few nearby folders. It is a self-contained executable: Python is not needed\n" +
+                "on the player's machine. A server already listening on BaseUrl is left alone.");
+
+            ServerExecutable = settings.Bind("2 - Server", "ServerExecutable", "",
+                "Explicit path to VoiceBackend.Server.exe. Empty searches the usual places.\n" +
+                "A relative path is tried next to the plugins folder, then the game root.");
+
+            ServerStartTimeoutSeconds = settings.Bind("2 - Server", "ServerStartTimeoutSeconds", 120, 5, 600,
+                "How long to wait for the auto-started server to answer /health. The first launch of\n" +
+                "a bundled Python runtime can take a while on a cold disk.");
+
+            StopServerOnExit = settings.Bind("2 - Server", "StopServerOnExit", true,
+                "Stop the server when the game exits, but only if this mod started it. A server that\n" +
+                "was already running before the game is never touched.");
 
             AsrEnabled = settings.Bind("3 - Speech recognition", "AsrEnabled", true,
                 "Replace Whisper with Parakeet. English uses EnglishModel, the languages Parakeet v3\n" +
@@ -196,6 +218,7 @@ namespace ScamWYF.VoiceBackend
         {
             Clamp(AsrTimeoutSeconds, settings.Int(AsrTimeoutSeconds, 1, 120));
             Clamp(TtsTimeoutSeconds, settings.Int(TtsTimeoutSeconds, 1, 600));
+            Clamp(ServerStartTimeoutSeconds, settings.Int(ServerStartTimeoutSeconds, 5, 600));
 
             if (SkipPocketModel.Value && TtsFallbackToPocket.Value)
             {

@@ -15,15 +15,35 @@ Speech synthesis is **Chatterbox**: Turbo for English, and (by default) Chatterb
 for languages Turbo does not speak. Turbo is English-only; that is a property of the checkpoint, not
 of this server.
 
+> **Players do not run this by hand.** A release ships a self-contained
+> `VoiceBackend.Server.exe` in `BepInEx/plugins/VoiceBackend/`, and the mod starts it with the game.
+> The instructions below are for developing or rebuilding the server.
+
 ## Requirements
 
-- Windows x64, Linux x64, or macOS. The mod itself is a Windows/Proton DLL.
-- [`uv`](https://docs.astral.sh/uv/) — it downloads a suitable Python and every dependency.
+- Windows x64, Linux x64, or macOS for the server. The mod itself is a Windows/Proton DLL.
+- For a normal install: nothing. The release contains the self-contained executable.
+- For building from source: [`uv`](https://docs.astral.sh/uv/), which downloads Python and every
+  dependency, and about 2 GB of free disk for the build.
 - Disk for the models: Parakeet v2 and v3 are about 700 MB each on first download; Chatterbox is
   another ~1.5 GB. They are cached by Hugging Face under your user profile.
 - NVIDIA GPU is optional. Parakeet runs well on CPU in int8; Chatterbox is much faster on a GPU.
 
-## Install and run
+## Build the standalone server
+
+```powershell
+./build-server.ps1              # server/dist/VoiceBackend.Server/
+./build-server.ps1 -Install     # ...and copy it into BepInEx/plugins/VoiceBackend/
+```
+
+PyInstaller bundles Python, onnxruntime, torch and the Chatterbox package into a one-folder
+application. The result is about **1.7 GB** and needs no Python on the target machine. Model weights
+are still downloaded on first use.
+
+The release layout puts that folder at `BepInEx/plugins/VoiceBackend/`, one level below the plugin
+scan. `ServerLauncher` finds it there and starts it with the game. See [`../RELEASING.md`](../RELEASING.md).
+
+## Install and run from source
 
 From this directory:
 
