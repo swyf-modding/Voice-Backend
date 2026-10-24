@@ -1,0 +1,130 @@
+name: ci
+
+# Runs the library's behaviour tests.
+#
+# That is the whole of it, and the limit is deliberate. The library compiles with -nostdlib+ against
+# the game's own mscorlib, so a hosted runner cannot build it: there is no Steam, and the game is not
+# ours to redistribute. A hosted runner therefore has nothing to offer beyond the tests, which use
+# nothing but the BCL and compile the real source files - so those run here, and the build happens on
+# the machine that has the game.
+#
+# The alternative was a second, self-hosted job for the real build, which is the tier that catches a
+# stripped API the build calls. It is not here, on purpose: a self-hosted job with no runner registered
+# does not fail, it queues and sits until GitHub cancels it 24 hours later. Every push to main left a
+# stuck job and a red build, and the "Run workflow" button did the same thing on demand.
+#
+# So the build, the API surface check and every release are manual. Run this before a release:
+#
+#     .\build.ps1 -LibraryOnly -Test -NoCopy
+#
+# That is the whole replacement, and it is one command against your own install.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    name: Behaviour tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.x'
+
+      # Each project compiles the source file it covers rather than a copy, so copy them in first
+      # exactly as build.ps1 would.
+      # No working-directory on these: the paths are relative to the repository root, and the copy has
+      # to be made from there too. Running from tests/watcher instead would break the cp.
+      - name: Run the ConfigWatcher tests
+        run: |
+          cp src/config/ConfigWatcher.cs tests/watcher/ConfigWatcher.cs
+          dotnet run --project tests/watcher/WatcherTests.csproj
+
+      - name: Run the window geometry tests
+        run: |
+          cp src/ui/WindowGeometry.cs tests/window/WindowGeometry.cs
+          dotnet run --project tests/window/WindowGeometryTests.csproj
+
+      - name: Run the content validation tests
+        run: |
+          cp src/content/ContentSpecs.cs tests/content/ContentSpecs.cs
+          cp src/content/ContentValidation.cs tests/content/ContentValidation.cs
+          dotnet run --project tests/content/ContentTests.csproj
+
+  scripts:
+    name: Build script
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The game is not on a hosted runner, so build.ps1 itself cannot run. Its two
+      # platform-sensitive parts can still be checked: that every script parses under pwsh, and that
+      # the game resolver accepts a fabricated install. The Steam search and the path separators used
+      # to be Windows-only, and neither needs the real game to exercise.
+      - name: Parse the PowerShell
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($file in Get-ChildItem -Recurse -Filter *.ps1) {
+              $tokens = $null
+              $errors = $null
+              [System.Management.Automation.Language.Parser]::ParseFile(
+                  $file.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+              if ($errors.Count) {
+                  $failed = $true
+                  $errors | ForEach-Object { Write-Host "$($file.Name): $($_.Message)" }
+              }
+          }
+          if ($failed) { throw 'a script does not parse' }
+          Write-Host 'all scripts parse'
+
+      - name: Resolve a fabricated game install
+        shell: pwsh
+        run: |
+          $game = Join-Path $env:RUNNER_TEMP 'Scam With Your Friends'
+          New-Item -ItemType Directory -Force -Path (Join-Path $game 'Scam With Your Friends_Data/Managed') | Out-Null
+          New-Item -ItemType File -Force -Path (Join-Path $game 'Scam With Your Friends_Data/Managed/mscorlib.dll') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $game 'BepInEx/core') | Out-Null
+          New-Item -ItemType File -Force -Path (Join-Path $game 'BepInEx/core/BepInEx.dll') | Out-Null
+
+          . ./GameDir.ps1
+
+          if ((Resolve-GameDir -Explicit $game) -ne $game) { throw 'a complete install was not found' }
+          if ((Resolve-GameDir -Explicit $game -Require Managed) -ne $game) { throw 'Managed was not satisfied' }
+          if ((Resolve-GameDir -Explicit $game -Require BepInEx) -ne $game) { throw 'BepInEx was not satisfied' }
+          Write-Host "resolved: $game"
+
+          # A mod that reads only the game's assemblies must not be turned away by a missing BepInEx,
+          # and the default must still insist on both. HOME is pointed at an empty directory for the
+          # second half, so a machine that happens to have Steam installed cannot satisfy the search
+          # in place of the candidate being tested.
+          $managedOnly = Join-Path $env:RUNNER_TEMP 'Managed Only'
+          New-Item -ItemType Directory -Force -Path (Join-Path $managedOnly 'Scam With Your Friends_Data/Managed') | Out-Null
+          New-Item -ItemType File -Force -Path (Join-Path $managedOnly 'Scam With Your Friends_Data/Managed/mscorlib.dll') | Out-Null
+
+          if ((Resolve-GameDir -Explicit $managedOnly -Require Managed) -ne $managedOnly) {
+              throw 'Require Managed rejected a Managed-only install'
+          }
+
+          $savedHome = $env:HOME
+          $savedXdg = $env:XDG_DATA_HOME
+          $savedGame = $env:SWYG_GAME_DIR
+          $env:HOME = Join-Path $env:RUNNER_TEMP 'empty-home'
+          $env:XDG_DATA_HOME = $null
+          $env:SWYG_GAME_DIR = $null
+          try {
+              $rejected = $false
+              try { Resolve-GameDir -Explicit $managedOnly | Out-Null } catch { $rejected = $true }
+              if (-not $rejected) { throw 'the default requirement accepted an install with no BepInEx' }
+          } finally {
+              $env:HOME = $savedHome
+              $env:XDG_DATA_HOME = $savedXdg
+              $env:SWYG_GAME_DIR = $savedGame
+          }
+          Write-Host 'requirement filtering behaves'

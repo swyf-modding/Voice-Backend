@@ -1,0 +1,39 @@
+# Build output
+bin/
+obj/
+
+# The behaviour test projects. Their sources are committed; their build output is not.
+tests/watcher/bin/
+tests/watcher/obj/
+tests/window/bin/
+tests/window/obj/
+
+# Copied into the test projects by build.ps1, so the tests always compile what is actually shipping.
+tests/watcher/ConfigWatcher.cs
+tests/window/WindowGeometry.cs
+tests/content/ContentSpecs.cs
+tests/content/ContentValidation.cs
+
+# Only build artefacts. Nothing that ships with the game or with BepInEx belongs here:
+# the game's assemblies, the unstripped BCL and the patched copies of it are not ours to
+# redistribute, and everyone generates their own with the scripts in Setup.
+*.dll
+*.pdb
+*.exe
+*.mdb
+
+# Game / BepInEx artefacts
+BepInEx/
+unstripped_corlib/
+unstripped_corlib_removed/
+LogOutput.log
+preloader_*.log
+Player.log
+doorstop_config.ini
+winhttp.dll
+.doorstop_version
+
+# Editors
+.vs/
+.idea/
+*.user

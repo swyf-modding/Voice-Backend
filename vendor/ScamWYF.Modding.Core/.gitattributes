@@ -1,0 +1,18 @@
+# Line endings. The game is Windows-only and these are all read by Windows tools, so CRLF in the
+# working tree and LF in the repository. Setting it here rather than relying on each developer's
+# core.autocrlf means a build is reproducible and diffs are not polluted by a checkout's line
+# endings - which matters here because the build compiles sources directly.
+* text=auto eol=crlf
+
+*.cs      text eol=crlf
+*.ps1     text eol=crlf
+*.csproj  text eol=crlf
+*.md      text eol=crlf
+*.gitignore text eol=crlf
+*.gitattributes text eol=crlf
+*.gitmodules text eol=crlf
+
+# Copied into the test projects by build.ps1 and ignored, but a stale copy should never be
+# committed if someone removes the ignore rule.
+tests/watcher/ConfigWatcher.cs    text eol=crlf
+tests/window/WindowGeometry.cs   text eol=crlf

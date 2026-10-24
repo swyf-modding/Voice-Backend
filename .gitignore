@@ -1,0 +1,9 @@
+bin/
+obj/
+vendor/ScamWYF.Modding.Core/bin/
+vendor/ScamWYF.Modding.Core/obj/
+server/.venv/
+server/__pycache__/
+server/models/
+*.user
+*.suo
