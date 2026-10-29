@@ -64,20 +64,35 @@ Copy-Item "vendor/ScamWYF.Modding.Core/bin/ScamWYF.Modding.Core.dll" $stage
 tar -a -c -f "release/Voice-Backend-0.5.0.zip" -C $stage ScamWYF.VoiceBackend.dll ScamWYF.Modding.Core.dll
 ```
 
-Then publish, uploading the four asset files as well:
+Then publish, uploading the four asset files as well. Stage them under their flat names first: the
+name on a release asset is the file's own name, so a file copied to `$assets/inno-encoder.onnx`
+becomes `inno-encoder.onnx`, and nothing has to be renamed afterwards.
 
 ```powershell
+$assets = "release/assets"
+Remove-Item -Recurse -Force $assets -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force $assets | Out-Null
+Copy-Item "assets/inno/encoder.onnx"        (Join-Path $assets "inno-encoder.onnx")
+Copy-Item "assets/inno/tuner.bin"          (Join-Path $assets "inno-tuner.bin")
+Copy-Item "assets/inno/default-voice.bin"  (Join-Path $assets "inno-default-voice.bin")
+Copy-Item "assets/g2p/en-lexicon.bin"      (Join-Path $assets "g2p-en-lexicon.bin")
+
 gh release create v0.5.0 `
     "release/Voice-Backend-0.5.0.zip" `
-    "assets/inno/encoder.onnx#inno-encoder.onnx" `
-    "assets/inno/tuner.bin#inno-tuner.bin" `
-    "assets/inno/default-voice.bin#inno-default-voice.bin" `
-    "assets/g2p/en-lexicon.bin#g2p-en-lexicon.bin" `
+    (Join-Path $assets "inno-encoder.onnx") `
+    (Join-Path $assets "inno-tuner.bin") `
+    (Join-Path $assets "inno-default-voice.bin") `
+    (Join-Path $assets "g2p-en-lexicon.bin") `
     --title v0.5.0 --notes-file RELEASE-NOTES.md
 ```
 
-`gh` treats `path#name` as "upload this file under that name", which is how a folder becomes a flat
-asset name.
+Then confirm every one of the five answers 200 at the URL `ModelStore` builds from the version:
+`https://github.com/swyf-modding/Voice-Backend/releases/download/v0.5.0/<asset name>`.
+
+`gh` does have a `path#name` form, but `gh` 2.102 ignored it and uploaded `encoder.onnx` under its own
+name, which left every asset URL the mod asks for answering 404. Check the download URLs after
+publishing rather than trusting the upload; renaming an asset through the API updates the listing but
+not the download path.
 
 ## Checklist
 
