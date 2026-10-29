@@ -3,7 +3,7 @@
 # ScamWYF.VoiceBackend
 
 ![license](https://img.shields.io/badge/license-MIT-blue)
-![game build](https://img.shields.io/badge/game-0.1.89--swyf-blue)
+![game build](https://img.shields.io/badge/game-0.1.92--swyf-blue)
 ![Unity](https://img.shields.io/badge/Unity-6000.3.26f1-blue)
 ![BepInEx](https://img.shields.io/badge/BepInEx-5.4.23.5-14172c?style=for-the-badge)
 
@@ -253,7 +253,7 @@ needs first, which is how the download path gets exercised without a live call.
 
 | Component | Verified Version |
 |---|---|
-| Scam With Your Friends | `0.1.89-swyf` |
+| Scam With Your Friends | `0.1.92-swyf` |
 | Unity | `6000.3.26f1` |
 | BepInEx | `5.4.23.5`, Mono preloader |
 | ScamWYF.Modding.Core | vendored from the local library checkout |
