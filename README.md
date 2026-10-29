@@ -7,7 +7,7 @@
 ![Unity](https://img.shields.io/badge/Unity-6000.3.26f1-blue)
 ![BepInEx](https://img.shields.io/badge/BepInEx-5.4.23.5-14172c?style=for-the-badge)
 
-*Built with:* C# · Harmony · BepInEx · Python · ONNX Runtime
+*Built with:* C# · Harmony · BepInEx · ONNX Runtime
 
 </div>
 
@@ -21,29 +21,30 @@ the two local speech models the game ships with:
 - **Whisper is replaced by NVIDIA Parakeet** — `parakeet-tdt-0.6b-v2` for English and
   `parakeet-tdt-0.6b-v3` for the 25 European languages it covers. The rest of the game's speech
   pipeline (voice-activity detection, partial transcripts, timings, echo filtering) is untouched.
-- **Pocket TTS is replaced by Chatterbox** — Chatterbox Turbo for English, Chatterbox Multilingual
-  V3 for the other languages when `TtsModel = Auto`, with zero-shot cloning from the game's own
-  per-caller reference WAVs.
+- **Pocket TTS is replaced by Kokoro** — Kokoro-82M for English, with the caller's voice tuned from
+  the game's own per-caller reference WAV by the inno-kokoro clone tuner instead of a fixed voice.
 
-The models run in a small companion server (`server/`) on the same machine, over loopback. The mod
-is a thin Harmony layer that sends audio to that server and feeds the answers back into the game's
-own structures, so the caller still gets subtitles, cancellation, first-audio handling and speaker
-routing exactly as before.
+Both models run **inside the game process**, on the ONNX Runtime the game already ships
+(`Scam With Your Friends_Data/Plugins/x86_64/onnxruntime.dll`). There is no companion server, no
+Python, and no second copy of a runtime: the mod is a Harmony layer that hands the same audio to the
+same two models and feeds the answers back into the game's own structures, so the caller still gets
+subtitles, cancellation, first-audio handling and speaker routing exactly as before.
 
 **Key features**
 
 - **One hook per feature.** Speech recognition joins at `Whisper.WhisperManager.GetTextAsync`;
   speech synthesis joins at `PocketTTS.PocketTTS.Prompt`. Everything around those calls is the
   game's own code.
-- **The stock Pocket model can stay unloaded.** With `SkipPocketModel = true` (the default), the
-  game's Pocket ONNX sessions never load. The component is faked into `Ready`, and Chatterbox
-  supplies every sample through the same frame queue.
+- **The stock Pocket model can stay unloaded.** With `SkipPocketModel = true` the game's Pocket ONNX
+  sessions never load: the component is faked into `Ready` and Kokoro supplies every sample through
+  the same frame queue. Off by default, because Kokoro is English-only here and other languages need
+  Pocket to answer; on for an English-only group.
 - **Per-language model choice.** English uses Parakeet v2, the v3 language set uses v3, and a
   language outside that set follows `OtherLanguages` — either the game's Whisper or v3 anyway.
 - **In-game settings and hot reload.** Every option is on the shared **F1** menu, and the `.cfg` is
   watched: turning a replacement off puts the original provider back without a restart.
-- **No telemetry, no credentials, no cloud calls.** The server binds to loopback. Model downloads
-  are the only network traffic.
+- **No telemetry, no credentials, no cloud calls.** Model downloads on first use are the only
+  network traffic; after that the mod never opens a socket.
 - No redistributed game DLLs or decompiled game source.
 
 This project is not affiliated with or endorsed by the developers or publisher of Scam With Your
@@ -57,11 +58,12 @@ Friends.
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Install the mod](#install-the-mod)
-  - [The server is started for you](#the-server-is-started-for-you)
+  - [Nothing to start](#nothing-to-start)
   - [Configure the mod](#configure-the-mod)
 - [Language Coverage](#language-coverage)
 - [Configuration Reference](#configuration-reference)
-- [The Companion Server](#the-companion-server)
+- [The Local Backend](#the-local-backend)
+- [Remote Services](#remote-services)
 - [Building and Testing](#building-and-testing)
 - [Compatibility](#compatibility)
 - [Known Limits](#known-limits)
@@ -84,294 +86,108 @@ Whisper.WhisperManager.GetTextAsync(float[] samples, int frequency, int channels
 
 `WhisperVcPipeline` owns the microphone, the voice-activity detector, the utterance buffer, the
 partial/final split, the 15-second timeout and the `OnTranscriptUpdated` events. When it has audio,
-it asks a `WhisperManager` for text. This mod replaces only that answer: the prefix encodes the
-samples as 16 kHz mono WAV, asks the server for the selected Parakeet checkpoint, and returns a
+it asks a `WhisperManager` for text. This mod replaces only that answer: the prefix resamples to
+16 kHz mono, runs the selected Parakeet checkpoint in-process on a worker thread, and returns a
 `WhisperResult` built from the text.
 
 The game also has a second recognizer, **Moonshine**, which on some machines it prefers and which
 would bypass the Whisper method entirely. While Parakeet is active, `WindowsSpeechCompatibility.UseMoonshine`
-is forced to `false`, so recognition stays on the path this mod answers. If the server fails and
-`FallbackToWhisper` is on, the original Whisper call is used for that request; the failure is still
-counted and shown on the menu tab.
+is forced to `false`, so recognition stays on the path this mod answers. If Parakeet fails (a model
+file missing, for instance) and `FallbackToWhisper` is on, the original Whisper call is used for that
+request; the failure is still counted and shown on the menu tab.
 
 ### Speech synthesis
 
-```csharp
-PocketTTS.PocketTTS.Prompt(string text, string voicePath, string languageCode)
-    -> bool
-```
+| Language | Local backend |
+|---|---|
+| English | Kokoro-82M, voice tuned from the caller's reference clip |
+| Everything else | The game's own provider — see the limit below |
 
-`PocketTtsSingleton` owns the request queue, caller/language bookkeeping, tracked-completion
-reports, cancellation and the speaker routing. `PocketTTS` owns the model, the audio queue, the
-frame pacer, sequence numbers and the word timings. This mod replaces the `Prompt` call and then
-enqueues Chatterbox's WAV through the game's own `OnResponseGenerated`/frame path, so all of the
-surrounding behaviour keeps working.
+**Kokoro here is English-only, on purpose.** Kokoro's acoustic model covers eight languages, but its
+other seven are phonemised with espeak-ng in the reference implementation, and this mod will not
+bundle a GPL native library. Rather than speak German with English phonemes, the mod declines the
+line and the game's Pocket TTS speaks it, which is why the shipping defaults are
+`SkipPocketModel = false` and `FallbackToPocket = true`: whatever Kokoro declines, Pocket answers.
 
-When `SkipPocketModel = true`, `PocketTTS.InitModel` is skipped and the component is put straight
-into `Ready` — the state `PrepareLegacyProvider` waits for. `WarmUpVoice` becomes a no-op and
-`IsVoiceReady` reports true, because Chatterbox clones from the same WAV rather than loading a
-local voice embedding. The game's 30-second "no audio progress" cancel and its slow-non-English
-transcript recovery are suspended only while a Chatterbox request is still generating.
-
-### What is not replaced
-
-The game has other speech providers. **Qwen TTS** and **MOSS TTS** are left exactly as they are.
-Languages the game routes to those providers (Chinese, Japanese, Korean, Russian in some
-configurations) keep using them. This mod replaces **Pocket**, which is what the game uses for
-English and most of the languages Pocket supports.
-
-Parakeet's speech recognition replacement covers every language that reaches the Whisper path.
-On Windows ARM64 the game uses its ARM speech worker instead of Whisper; this mod does not replace
-that path.
+This is the only place the local backend is narrower than the old Chatterbox server, which covered
+23 languages.
 
 ---
 
-## Getting Started
+## The Local Backend
 
-### Prerequisites
+Everything runs in the game process, on the ONNX Runtime the game already has. The mod only supplies
+code and a few small assets; the weights are downloaded once.
 
-- A legally installed copy of **Scam With Your Friends**. Verified against `0.1.89-swyf`, Unity
-  `6000.3.26f1`.
-- BepInEx and the unstripped corlib override, installed by
-  [Setup](https://github.com/swyf-modding/Setup). The game ships a stripped `mscorlib` that
-  BepInEx cannot start without.
-- [ScamWYF.Modding.Core](https://github.com/swyf-modding/mod-lib), which owns the shared menu. It is
-  vendored in `vendor/` here so the repository builds out of the box.
-- The release includes a **self-contained server executable**. Python is only needed if you build
-  that server from source; a player installing the mod does not install Python or `uv`.
-- Disk for the server and the models: the CPU server folder is about **1.7 GB**; a CUDA build is
-  about **7.5 GB** because it carries both torch's CUDA 12 runtime and ONNX Runtime's CUDA 13
-  libraries. The models are downloaded on first use — two Parakeet checkpoints (~700 MB each) and
-  one or both Chatterbox checkpoints (~1.5 GB each).
-- An NVIDIA GPU is optional. Parakeet is comfortable on CPU in int8; Chatterbox is much faster on a
-  GPU and is the part where a CPU-only machine feels slow.
+| Model | Files | Size | Source |
+|---|---|---|---|
+| Parakeet v2 (English ASR) | `nemo128.onnx`, `encoder-model.int8.onnx`, `decoder_joint-model.int8.onnx`, `vocab.txt` | 630 MB | `istupakov/parakeet-tdt-0.6b-v2-onnx` |
+| Parakeet v3 (25 European ASR) | same four | 630 MB | `istupakov/parakeet-tdt-0.6b-v3-onnx` |
+| Kokoro-82M (TTS) | `kokoro-v1.0.onnx` | 325 MB | kokoro-onnx release `model-files-v1.1` |
+| inno-kokoro tuner | `encoder.onnx`, `tuner.bin`, `default-voice.bin` | 30 MB | `remsky/kokoro-inno-clone-tuner` v0.2.0, converted by `tools/export-inno.py` |
+| English lexicon | `en-lexicon.bin` | 2.4 MB | the `misaki` package's IPA dictionaries, packed by `tools/build-lexicon.py` |
 
-### Install the mod
+Downloads go to `BepInEx/plugins/VoiceBackend/models/<model>/`, one folder per model, written as
+`.part` and renamed when the byte length matches the catalog. `AutoDownload = false` turns that off
+for a hand-placed folder.
 
-```powershell
-git clone --recurse-submodules https://github.com/swyf-modding/Voice-Backend.git
-cd Voice-Backend
-./build.ps1                # builds and copies into the game
-./build.ps1 -NoCopy -Test  # build, run the library tests, do not touch the game
-```
+**Speech recognition** is Parakeet TDT, decoded the way the model wants: `nemo128.onnx` produces the
+log-mel features, the conformer encoder runs once per clip, and the joint network then emits a token
+plus a duration per frame, so the loop advances by the duration the model chose. Nothing is
+reimplemented except the loop itself.
 
-`build.ps1` builds the shared library first, then this mod against the dll it just produced, then
-installs:
+**Speech synthesis** is Kokoro. Text goes through the ported misaki lexicon and morphology, the
+phonemes map to Kokoro's 115-symbol vocabulary, and the style vector comes from the inno-kokoro
+tuner: it embeds the caller's reference clip, blends Kokoro's stock prosody packs by pitch and rate,
+and writes the 510-row voice table Kokoro conditions on. With no reference clip the stock
+`af_heart` voice is used.
 
-- `ScamWYF.VoiceBackend.dll` → `BepInEx/plugins`
-- `ScamWYF.Modding.Core.dll` → `BepInEx/core`
+`Backend = Remote` reverses who does the work: the mod posts the same requests the old companion
+server answered —
 
-A release zip also contains the self-contained server in `BepInEx/plugins/VoiceBackend/`. When
-building from source, create that folder once with `server/build-server.ps1 -Install`; `build.ps1`
-does not compile it.
-
-The library is deliberately **not** in `plugins`: BepInEx would try to load it as a plugin, and every
-mod embedding its own copy would give the game two menus and two hotkey tables.
-
-The game install is auto-detected, or set `SWYG_GAME_DIR` / pass `-GameDir`.
-
-### The server is started for you
-
-A release puts the self-contained server in `BepInEx/plugins/VoiceBackend/`:
-
-```text
-BepInEx/plugins/
-|-- ScamWYF.VoiceBackend.dll
-`-- VoiceBackend/
-    |-- VoiceBackend.Server.exe
-    `-- _internal/...
-```
-
-On game start the mod checks `/health`. If nothing is listening, it launches
-`VoiceBackend.Server.exe`, waits for it to become healthy, and then asks it to warm its models. On a
-normal game exit it stops the server again — but only if the mod started it. A server you had
-already started yourself is never touched.
-
-The server's stdout/stderr goes to `BepInEx/VoiceBackend.Server.log`, which is the first place to
-look if it does not start. The menu's **Voice Backend** tab shows the process state and has
-**Start server** / **Stop server** buttons.
-
-There is nothing else to install or start for a normal player. Python, `uv` and `pip` are only for
-building the server from source:
-
-```powershell
-cd server
-./build-server.ps1 -Install
-```
-
-Running the Python server by hand is still useful while developing it:
-
-```powershell
-cd server
-uv sync --extra tts
-./start.ps1
-```
-
-The mod leaves an already-running server alone, so either workflow is fine.
-
-### GPU or CPU: `Mode`
-
-`Mode` decides where inference runs. The default is `Gpu`:
-
-| Value | Behaviour |
-|---|---|
-| `Gpu` | Prefer the GPU. Chatterbox uses CUDA/ROCm (`cuda` in torch), Intel XPU, or Apple MPS. Parakeet uses TensorRT/CUDA/ROCm/DirectML/OpenVINO/CoreML/WebGPU if the ONNX Runtime has one. If nothing usable is present, the server logs a warning and runs on CPU. |
-| `Auto` | Same as `Gpu`, but a CPU fallback is silent. |
-| `Cpu` | Force CPU for both models. |
-
-The hardware is detected at runtime, not at build time, so `Mode = Gpu` is the only setting a player
-normally changes. The **server binary itself** has to contain the matching runtime:
-
-| Build | Hardware |
-|---|---|
-| `-Backend cuda` | NVIDIA CUDA 12/13, with CPU fallback. ~7.5 GB. |
-| `-Backend rocm` | AMD ROCm on Linux. |
-| `-Backend directml` | Windows DirectML for Parakeet; Chatterbox stays CPU. |
-| `-Backend cpu` | CPU only, smallest (~1.7 GB). |
-| `-Backend auto` | Detects the build machine's GPU and picks one of the above. |
-
-The menu's **Check server** button shows the selected torch device, backend and ONNX providers from
-`/health`, which is the quickest way to confirm that `Gpu` really selected the GPU.
-
-### Configure the mod
-
-Launch the game once. BepInEx writes
-`BepInEx/config/com.community.scamwyf.voicebackend.cfg`. Press **F1** and open **Voice Backend** for
-the same settings as a form, or edit the file in a text editor; it is watched and takes effect
-within about half a second.
-
-The defaults are the intended setup:
-
-```ini
-[1 - General]
-Enabled = true
-
-[2 - Server]
-BaseUrl = http://127.0.0.1:8010
-Mode = Gpu
-WarmupOnLoad = true
-AutoStartServer = true
-StopServerOnExit = true
-
-[3 - Speech recognition]
-AsrEnabled = true
-EnglishModel = V2
-EuropeanModel = V3
-OtherLanguages = Whisper
-
-[4 - Text to speech]
-TtsEnabled = true
-TtsModel = Auto
-SkipPocketModel = true
-```
+| Endpoint | Body | Response |
+|---|---|---|
+| `POST /asr?language=en&model=v2` | 16 kHz mono WAV | `{"text": "...", "confidence": 0.0}` |
+| `POST /tts` | JSON `{text, language, voice_path}` | 24 kHz mono WAV |
+| `GET /health` | — | provider and device report |
 
 ---
 
-## Language Coverage
+## Remote Services
 
-### Speech recognition
+`AsrService` and `TtsService` are independent, so the four arrangements that matter all work:
+everything local (default), local recognition with cloud speech, cloud recognition with Kokoro, or
+both remote.
 
-| Game language | Model | Notes |
-|---|---|---|
-| English (`en`) | Parakeet v2 | English-only checkpoint; the best English accuracy. |
-| Spanish, French, German, Italian, Portuguese, Dutch, Polish, Czech, Russian, Ukrainian, Danish, Swedish, Finnish, Greek, Hungarian, Romanian, Bulgarian, Croatian, Estonian, Latvian, Lithuanian, Maltese, Slovak, Slovenian | Parakeet v3 | The model's full 25-language set. |
-| Chinese, Japanese, Korean, Arabic, Persian, Hindi, Turkish, Indonesian, and anything else | The game's Whisper | Default. `OtherLanguages = ParakeetV3` sends it to v3 instead. |
+| Setting | Service | What the mod sends | What it asks for back |
+|---|---|---|---|
+| `Deepgram` | Deepgram pre-recorded listen | the utterance as `audio/wav`, `Authorization: Token <key>` | JSON, `results.channels[0].alternatives[0].transcript` |
+| `Gladia` | Gladia pre-recorded | multipart upload, then a job, then polling every second | JSON, `result.transcription.utterances[]` joined |
+| `OpenAi` | `/v1/audio/transcriptions` | multipart: `file`, `model`, `language`, `response_format=json` | JSON, `text` |
+| `ElevenLabs` | ElevenLabs text to speech | JSON `{text, voice_settings}`, `xi-api-key` | **raw 16-bit PCM at 24 kHz** (`output_format=pcm_24000`) |
+| `Deepgram` | Deepgram Aura speak | JSON `{text}`, `Authorization: Token <key>` | WAV (`container=wav`, `encoding=linear16`) |
+| `OpenAi` | `/v1/audio/speech` | JSON `{model, voice, input, response_format=pcm}` | **raw 16-bit PCM** |
+| `Server` | this mod's own `/asr` and `/tts` | sees below | 24 kHz mono WAV |
 
-Parakeet v3 detects the language itself; no language prompt is sent.
+Every request asks for a format the mod can consume without a media decoder: raw linear16 or WAV.
+MP3, Ogg/Opus and WebM bodies are refused by name rather than played as noise, so a service that
+ignores the requested format fails loudly instead of sounding broken.
 
-### Speech synthesis
+**Settings live in `[2 - Remote API]`:** one base URL per service (point it at a proxy or a
+self-hosted server when audio must not leave your network), one key each, and the model or voice
+names. `OpenAiUrl` also covers any server that speaks the OpenAI shape - faster-whisper-server,
+LocalAI, LM Studio - which is the cheap way to move recognition off the game's process without an
+account.
 
-| Language | `TtsModel = Auto` |
-|---|---|
-| English | Chatterbox **Turbo** (350M, English only) |
-| Arabic, Danish, German, Greek, Spanish, Finnish, French, Hebrew, Hindi, Italian, Japanese, Korean, Malay, Dutch, Norwegian, Polish, Portuguese, Russian, Swedish, Swahili, Turkish, Chinese | Chatterbox **Multilingual V3** |
-| Czech, Estonian, Indonesian, Hungarian | Multilingual V3 with English (`en`) as the language tag; the script is Latin and the result is intelligible, not native. |
-| Persian | Multilingual V3 with Arabic (`ar`) as the language tag. |
-| Anything else | English. Set `TtsModel = Turbo` if you want Turbo for everything. |
+Keys are stored in plain text in the `.cfg`, the same file BepInEx writes everything else to. The
+mod never logs a key: a URL is redacted before it appears in `LogOutput.log`, and the debug line for
+a request prints the length of the body, not its contents.
 
-Chatterbox Turbo is English-only. That is a property of the checkpoint: using it for Spanish or
-German produces an English voice reading those words. `Auto` exists so the common case (English
-callers) gets the fast model and other languages still sound like the language they are written in.
-
----
-
-## Configuration Reference
-
-`BepInEx/config/com.community.scamwyf.voicebackend.cfg`.
-
-### General
-
-| Key | Default | Meaning |
-|---|---|---|
-| `Enabled` | `true` | Master switch. Off installs no patches at all. |
-| `Debug` | `false` | Log every request: URL, model, audio length, HTTP status. |
-
-### Server
-
-| Key | Default | Meaning |
-|---|---|---|
-| `BaseUrl` | `http://127.0.0.1:8010` | Server root. `AsrPath` and `TtsPath` are appended. |
-| `Mode` | `Gpu` | `Gpu` prefers CUDA/ROCm/XPU/MPS and falls back to CPU; `Auto` does the same without warning; `Cpu` forces CPU. |
-| `AsrPath` | `/asr` | Speech-recognition endpoint. |
-| `TtsPath` | `/tts` | Text-to-speech endpoint. |
-| `ApiKey` | *(empty)* | Sent as `Authorization: Bearer`. Stored in plain text. |
-| `AsrTimeoutSeconds` | `10` | Per-request recognition timeout, below the game's 15 seconds. |
-| `TtsTimeoutSeconds` | `90` | Per-request synthesis timeout. CPU-only Chatterbox needs the headroom. |
-| `WarmupOnLoad` | `true` | Ask the server to load its models at game start. |
-| `AutoStartServer` | `true` | Launch `VoiceBackend.Server.exe` if nothing is listening. |
-| `ServerExecutable` | *(empty)* | Explicit server path. Empty searches `BepInEx/plugins/VoiceBackend`, `BepInEx/plugins`, the game root and nearby folders. |
-| `ServerStartTimeoutSeconds` | `300` | How long to wait for the auto-started server to answer `/health`. A cold CUDA bundle can take a while on the first launch. |
-| `StopServerOnExit` | `true` | Stop the server on game exit, but only if this mod started it. |
-
-### Speech recognition
-
-| Key | Default | Meaning |
-|---|---|---|
-| `AsrEnabled` | `true` | Replace Whisper with Parakeet and disable Moonshine. |
-| `EnglishModel` | `V2` | `V2` or `V3` for English. |
-| `EuropeanModel` | `V3` | `V2` or `V3` for the v3 language set. |
-| `OtherLanguages` | `Whisper` | `Whisper` or `ParakeetV3` outside v3's set. |
-| `FallbackToWhisper` | `true` | If the server fails, run the game's Whisper for that request. |
-
-### Text to speech
-
-| Key | Default | Meaning |
-|---|---|---|
-| `TtsEnabled` | `true` | Replace the Pocket provider with Chatterbox. |
-| `TtsModel` | `Auto` | `Auto`, `Turbo` or `Multilingual`. |
-| `SkipPocketModel` | `true` | Never load the game's Pocket ONNX models. |
-| `FallbackToPocket` | `false` | On failure, use the stock Pocket model. Requires `SkipPocketModel = false`; the two cannot both be on. |
-| `SendVoiceAudio` | `false` | Upload the reference WAV instead of sending its path. For a remote server. |
-
-The menu tab also shows live request/failure counts, Whisper fallbacks, the last request, the last
-error verbatim, and a **Check server** button that reads `/health`.
-
----
-
-## The Companion Server
-
-The server is described in [`server/README.md`](server/README.md). It is a self-contained
-`VoiceBackend.Server.exe` built with PyInstaller: Python, torch, onnxruntime and the Chatterbox
-package are inside its folder. The mod starts it automatically, and its output goes to
-`BepInEx/VoiceBackend.Server.log`.
-
-The model weights are **not** in the executable. They are downloaded on first use into the Hugging
-Face cache, so the first English line on a fresh machine waits for Parakeet v2, and the first
-non-English line waits for the checkpoint it needs.
-
-| Endpoint | Purpose |
-|---|---|
-| `POST /asr?language=en&model=v2` | Parakeet transcription of a WAV body. |
-| `POST /tts` | Chatterbox synthesis; returns 24 kHz mono WAV. |
-| `GET /health` | Loaded models, device, quantization. |
-| `POST /warmup` | Load models in the background. |
-
-It uses [`onnx-asr`](https://github.com/istupakov/onnx-asr) for Parakeet (no NeMo toolkit, no CUDA
-requirement) and the official `chatterbox-tts` package for Chatterbox. Both are optional halves:
-without the `tts` extra, `/asr` still works and `/health` reports `tts.installed: false`.
-
-The server is not bundled into the DLL. That is deliberate: the models are gigabytes, Python is
-where their runtimes live, and a model crash should not take the game process with it.
+**What remote speech does not do:** it does not clone the caller. ElevenLabs, Deepgram Aura and the
+OpenAI voices speak in the one voice configured for that service, so every caller sounds the same
+unless you keep `TtsService = Local` for the cloned voices or run one voice per service yourself.
+Language is passed as a two-letter code from the game's own language for that turn; ElevenLabs'
+multilingual models infer it from the text.
 
 ---
 
@@ -395,13 +211,27 @@ BepInEx still loads plugins and applies Harmony patches, and writes
 `BepInEx/LogOutput.log`. `-batchmode` loads no scene, so the call paths that need a live call cannot
 be exercised, but patch installation and the model warm-up request can.
 
-The server can be checked by hand:
+The inference code has a console harness that runs outside Unity against the game's own
+`onnxruntime.dll`, which is the fastest way to check a change without a live call:
 
 ```powershell
-curl.exe http://127.0.0.1:8010/health
-curl.exe -X POST "http://127.0.0.1:8010/asr?language=en&model=v2" `
-  -H "Content-Type: audio/wav" --data-binary "@test.wav"
+$env:VOICEBACKEND_ORT_DIR = "C:\...\Scam With Your Friends_Data\Plugins\x86_64"
+dotnet run --project tests/local -- probe
+dotnet run --project tests/local -- asr .\models\parakeet-v2 tests/local/fixtures/asr/01.wav
+dotnet run --project tests/local -- tts . <text-file> <reference.wav> out.wav
 ```
+
+`tests/local/fixtures` holds reference transcripts and a reference Kokoro render, generated once by
+the Python stack (see its README), so a change can be compared against something other than itself.
+
+The remote paths have a stub: `tools/service-stub.ps1` answers with the payload shapes Deepgram,
+Gladia, ElevenLabs and OpenAI document, logs every request's path, authorization header and
+multipart framing, and lets the same in-game round trip run without an account or a cent of quota.
+
+There is also an in-game round trip: start the game with `VOICEBACKEND_SELFTEST=1` set and
+`-batchmode -nographics`, and the mod synthesises a known sentence with Kokoro, feeds the audio back
+through Parakeet, and logs what it heard with both timings. It downloads whatever the configuration
+needs first, which is how the download path gets exercised without a live call.
 
 ---
 
@@ -414,8 +244,9 @@ curl.exe -X POST "http://127.0.0.1:8010/asr?language=en&model=v2" `
 | BepInEx | `5.4.23.5`, Mono preloader |
 | ScamWYF.Modding.Core | vendored from the local library checkout |
 | C# language level | `7.3` |
-| Server | Python 3.11, `onnx-asr` 0.12, `chatterbox-tts` 0.1.7, torch 2.6 |
-| Platform | Windows x64; the server also runs on Linux/macOS, the mod is a Windows DLL (Proton included) |
+| Runtime | the game's own `onnxruntime.dll` (reports ABI 1.17, CPU + DirectML) |
+| Models | `istupakov/parakeet-tdt-0.6b-v2-onnx` (int8), `istupakov/parakeet-tdt-0.6b-v3-onnx` (int8), `kokoro-v1.0.onnx` from the kokoro-onnx release, `remsky/kokoro-inno-clone-tuner` v0.2.0 |
+| Platform | Windows x64 (Proton included); the local backend has no platform code beyond Win32 DLL loading |
 
 Other game builds are untested. `GameBuild.CheckUnityVersion` reports a mismatch as a warning naming
 both versions rather than assuming support.
@@ -424,35 +255,43 @@ both versions rather than assuming support.
 
 ## Known Limits
 
+- **Kokoro speaks English here.** Its other seven languages need espeak-ng in the reference stack;
+  the mod declines those lines instead of speaking them with English phonemes. Set
+  `SkipPocketModel = false` and `FallbackToPocket = true` so the game's Pocket TTS covers them.
 - **Only the Pocket provider is replaced.** Qwen TTS and MOSS TTS continue to serve the languages
-  the game routes to them. If you want Chatterbox for those too, `TtsModel` does not change the
-  provider choice — that is game-side.
-- **Chatterbox on CPU is slow.** It generates the whole clip before answering. A ten-second line
-  can take tens of seconds on CPU. Use a CUDA build of torch for anything beyond testing. The mod
-  suspends the game's 30-second stall cancel while synthesis is in flight, but the caller still
-  takes that long to start speaking.
+  the game routes to them. That is game-side, not a setting.
+- **Cloning is approximate.** The inno-kokoro tuner fits a Kokoro style vector to the reference clip:
+  the model card measures about a third of the way to the speaker's identity, against 0.695 for a
+  second real recording of that speaker. It is a voice that reads as the same person, not a copy.
+- **The pronunciation lexicon is a port, not the reference.** English graphemes go through the
+  misaki lexicon plus morphology and a letter-to-sound fallback, because misaki's neural fallback
+  needs spaCy and BART. Dictionary words match the reference exactly; invented names are guesswork.
+- **Recognition runs on the game's ONNX Runtime**, which is an older build than a current Python
+  wheel. Parakeet is int8, and int8 kernels differ between versions: on the same clip this port and
+  a current `onnx-asr` agree on the words but can differ in the last word of a long clip. That is the
+  runtime, not the mod.
 - **Windows ARM64 is not covered for recognition.** The game bypasses Whisper there and uses its
   own ARM speech worker; this mod patches the Whisper path.
-- **The first request downloads models.** The server is started automatically, but a fresh install
-  still downloads the selected checkpoints before the first answer. `WarmupOnLoad` starts that in
-  the background at game load; a cold server plus an immediate first caller can still be slow.
-- **The server folder is large.** It is about 1.7 GB because it contains Python, torch and the
-  Chatterbox runtime. The model weights are downloaded separately on first use. This is the cost of
-  not asking players to install Python.
-- **Auto-start is local only.** If `BaseUrl` points at another machine, the mod leaves it alone and
-  expects that machine to be running the server.
-- **Reference voices come from the game.** Chatterbox clones the WAV the game already uses for that
-  caller. A custom/community voice that is not on disk where the server can read it will fall back to
-  the server's default voice or no reference; `SendVoiceAudio = true` fixes the remote-server case.
+- **The first request downloads models.** About 630 MB for Parakeet v2, 630 MB more for v3, 325 MB
+  for Kokoro. `WarmupOnLoad` only preloads what is already on disk.
+- **Reference voices come from the game.** The tuner reads the WAV the game already uses for that
+  caller. With no reference clip it uses a stock Kokoro voice instead.
+- **Remote speech is one voice.** ElevenLabs, Deepgram Aura and the OpenAI voices ignore the game's
+  per-caller reference clips: every caller sounds like the configured voice. Only `TtsService = Local`
+  clones.
+- **A remote `Server` backend is expected to exist.** `AsrService`/`TtsService = Server` post the
+  `/asr` and `/tts` requests the old companion server served; nothing here ships that server.
+- **The remote services cost money per request.** The menu's **Check models** describes a service
+  instead of calling it, precisely so a diagnostic click cannot spend quota.
 
 ---
 
 ## Security
 
-The companion server binds to `127.0.0.1` by default and has no authentication because it is meant
-to be reachable only by the local game. If you change `VOICE_HOST`, put it behind something that
-authenticates. It holds no credentials and sends no telemetry; the only outbound traffic is model
-downloads from Hugging Face.
+The local backend opens no listening socket at all: it runs in the game's process. The only outbound
+traffic is the model download from Hugging Face and the GitHub release asset, both on first use.
+`Backend = Remote` is the only path that talks to a network address, and that address is whatever you
+configure.
 
 Do not paste `BepInEx/LogOutput.log` into a public issue without checking it: **this mod logs the
 configured endpoint, the selected models and request timings**, and the server logs reference voice
@@ -465,7 +304,9 @@ paths.
 MIT — Copyright © 2026 Ras_rap. See [LICENSE](LICENSE).
 
 The models are separate works under their own licences: Parakeet TDT v2/v3 are CC BY 4.0 from NVIDIA,
-and Chatterbox is MIT from Resemble AI. Nothing here grants any right to the game's own assemblies.
+Kokoro-82M is Apache-2.0, and the inno-kokoro tuner is Apache-2.0 except its baked speaker encoder,
+which is CC BY-SA 3.0 (see `tools/export-inno.py`). Nothing here grants any right to the game's own
+assemblies.
 
 `vendor/ScamWYF.Modding.Core` is the shared library, vendored so this repository builds out of the
 box. To track upstream instead, replace it with the submodule:

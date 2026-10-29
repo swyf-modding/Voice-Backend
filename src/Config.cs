@@ -23,16 +23,7 @@ namespace ScamWYF.VoiceBackend
         ParakeetV3
     }
 
-    /// <summary>Which Chatterbox checkpoint the companion server should use.</summary>
-    public enum TtsModelMode
-    {
-        /// <summary>Turbo for English, Chatterbox Multilingual V3 for the languages Turbo does not speak.</summary>
-        Auto,
-        /// <summary>Always Chatterbox Turbo. English only; other languages inherit an English accent.</summary>
-        Turbo,
-        /// <summary>Always Chatterbox Multilingual V3.</summary>
-        Multilingual
-    }
+
 
     /// <summary>Where the companion server runs inference.</summary>
     public enum DeviceMode
@@ -50,6 +41,25 @@ namespace ScamWYF.VoiceBackend
         public readonly ConfigEntry<bool> Enabled;
         public readonly ConfigEntry<bool> Debug;
 
+        public readonly ConfigEntry<Api.SttService> AsrService;
+        public readonly ConfigEntry<Api.TtsService> TtsService;
+        public readonly ConfigEntry<bool> AutoDownload;
+
+        public readonly ConfigEntry<string> DeepgramUrl;
+        public readonly ConfigEntry<string> DeepgramApiKey;
+        public readonly ConfigEntry<string> DeepgramSttModel;
+        public readonly ConfigEntry<string> DeepgramTtsVoice;
+        public readonly ConfigEntry<string> GladiaUrl;
+        public readonly ConfigEntry<string> GladiaApiKey;
+        public readonly ConfigEntry<string> ElevenLabsUrl;
+        public readonly ConfigEntry<string> ElevenLabsApiKey;
+        public readonly ConfigEntry<string> ElevenLabsVoiceId;
+        public readonly ConfigEntry<string> ElevenLabsModel;
+        public readonly ConfigEntry<string> OpenAiUrl;
+        public readonly ConfigEntry<string> OpenAiApiKey;
+        public readonly ConfigEntry<string> OpenAiSttModel;
+        public readonly ConfigEntry<string> OpenAiTtsModel;
+        public readonly ConfigEntry<string> OpenAiTtsVoice;
         public readonly ConfigEntry<string> BaseUrl;
         public readonly ConfigEntry<DeviceMode> Mode;
         public readonly ConfigEntry<string> AsrPath;
@@ -58,10 +68,6 @@ namespace ScamWYF.VoiceBackend
         public readonly ConfigEntry<int> AsrTimeoutSeconds;
         public readonly ConfigEntry<int> TtsTimeoutSeconds;
         public readonly ConfigEntry<bool> WarmupOnLoad;
-        public readonly ConfigEntry<bool> AutoStartServer;
-        public readonly ConfigEntry<string> ServerExecutable;
-        public readonly ConfigEntry<int> ServerStartTimeoutSeconds;
-        public readonly ConfigEntry<bool> StopServerOnExit;
 
         public readonly ConfigEntry<bool> AsrEnabled;
         public readonly ConfigEntry<ParakeetModel> EnglishModel;
@@ -70,7 +76,6 @@ namespace ScamWYF.VoiceBackend
         public readonly ConfigEntry<bool> AsrFallbackToWhisper;
 
         public readonly ConfigEntry<bool> TtsEnabled;
-        public readonly ConfigEntry<TtsModelMode> TtsModel;
         public readonly ConfigEntry<bool> SkipPocketModel;
         public readonly ConfigEntry<bool> TtsFallbackToPocket;
         public readonly ConfigEntry<bool> SendVoiceAudio;
@@ -85,20 +90,56 @@ namespace ScamWYF.VoiceBackend
                 "Log every request to the companion server: URL, model, audio length, HTTP status and\n" +
                 "timing. Useful when a turn is slow or a reply looks wrong.");
 
-            BaseUrl = settings.Bind("2 - Server", "BaseUrl", "http://127.0.0.1:8010",
-                "Base URL of the companion server in server/ (or any server speaking the same two\n" +
-                "endpoints). No trailing slash and no endpoint path: AsrPath and TtsPath are appended.\n" +
-                "Example: http://127.0.0.1:8010");
+            AsrService = settings.BindChoice("2 - Backend", "AsrService", Api.SttService.Local,
+                new[]
+                {
+                    Api.SttService.Local, Api.SttService.Server, Api.SttService.Deepgram,
+                    Api.SttService.Gladia, Api.SttService.OpenAi
+                },
+                "Who transcribes the microphone.\n" +
+                "Local    = Parakeet in this process, on the game's own ONNX Runtime. No account, no\n" +
+                "           network, downloaded on first use.\n" +
+                "Server   = a server speaking this mod's own /asr endpoint (BaseUrl below).\n" +
+                "Deepgram = api.deepgram.com pre-recorded listen, model DeepgramSttModel.\n" +
+                "Gladia   = api.gladia.io pre-recorded, uploaded and polled.\n" +
+                "OpenAi   = /v1/audio/transcriptions, which also covers any self-hosted server that\n" +
+                "           speaks that shape (faster-whisper-server, LM Studio and friends).");
 
-            Mode = settings.BindChoice("2 - Server", "Mode", DeviceMode.Gpu,
+            TtsService = settings.BindChoice("2 - Backend", "TtsService", Api.TtsService.Local,
+                new[]
+                {
+                    Api.TtsService.Local, Api.TtsService.Server, Api.TtsService.ElevenLabs,
+                    Api.TtsService.Deepgram, Api.TtsService.OpenAi
+                },
+                "Who speaks the caller's lines.\n" +
+                "Local      = Kokoro in this process, voice tuned from the caller's reference clip.\n" +
+                "Server     = a server speaking this mod's own /tts endpoint (BaseUrl below).\n" +
+                "ElevenLabs = api.elevenlabs.io text-to-speech, voice ElevenLabsVoiceId.\n" +
+                "Deepgram   = api.deepgram.com Aura speak, voice DeepgramTtsVoice.\n" +
+                "OpenAi     = /v1/audio/speech, which also covers any server that speaks that shape.\n" +
+                "The remote services do not clone the game's reference clips: they speak in the voice\n" +
+                "configured here, for every caller.");
+
+            AutoDownload = settings.Bind("2 - Backend", "AutoDownload", true,
+                "Fetch missing model files from their public release URLs on first use. When off, the\n" +
+                "files have to be placed in BepInEx/plugins/VoiceBackend/models by hand and a missing\n" +
+                "file is an error with the path in it.");
+
+            BaseUrl = settings.Bind("2 - Server", "BaseUrl", "http://127.0.0.1:8010",
+                "Base URL of the server used when Backend = Remote. No trailing slash and no endpoint\n" +
+                "path: AsrPath and TtsPath are appended. Example: http://127.0.0.1:8010");
+
+            Mode = settings.BindChoice("2 - Backend", "Mode", DeviceMode.Cpu,
                 new[] { DeviceMode.Auto, DeviceMode.Cpu, DeviceMode.Gpu },
-                "Where the server runs inference.\n" +
-                "Gpu  = prefer the GPU: CUDA or ROCm (both reported by torch as cuda), Intel XPU, or\n" +
-                "       Apple MPS for Chatterbox; TensorRT/CUDA/ROCm/DirectML/OpenVINO/CoreML/WebGPU\n" +
-                "       for Parakeet's ONNX Runtime. If the bundled runtime has no usable GPU\n" +
-                "       provider, the server logs a warning and falls back to CPU rather than failing.\n" +
-                "Auto = use a GPU when one is visible, otherwise CPU.\n" +
-                "Cpu  = force CPU.");
+                "Which execution provider ONNX Runtime is asked for.\n" +
+                "Cpu  = the CPU provider. Measured on this machine: Parakeet decodes 4 s of speech in\n" +
+                "       about 180 ms and Kokoro renders 2.8 s in about 540 ms.\n" +
+                "Gpu  = append the game's DirectML provider. Worth trying on a discrete GPU, but the\n" +
+                "       runtime the game ships is a 1.17 build and DirectML refuses some of these\n" +
+                "       graphs: Kokoro fails outright on its ConvTranspose node. The mod detects that,\n" +
+                "       logs it, and reloads every model on the CPU, so Gpu is safe to try - just not\n" +
+                "       the default.\n" +
+                "Auto = same as Gpu.");
 
             AsrPath = settings.Bind("2 - Server", "AsrPath", "/asr",
                 "Speech-recognition endpoint, appended to BaseUrl. It receives a WAV body and returns\n" +
@@ -117,32 +158,66 @@ namespace ScamWYF.VoiceBackend
                 "15 seconds; this should stay below that so the failure is ours and says why.");
 
             TtsTimeoutSeconds = settings.Bind("2 - Server", "TtsTimeoutSeconds", 90, 1, 600,
-                "How long one text-to-speech request may take. Chatterbox generates the whole clip\n" +
+                "How long one text-to-speech request may take. Kokoro renders the whole clip\n" +
                 "before answering, so this needs headroom on a CPU-only server.");
 
             WarmupOnLoad = settings.Bind("2 - Server", "WarmupOnLoad", true,
-                "Ask the server to load both Parakeet checkpoints (and Chatterbox, if TTS is on) when\n" +
-                "the game starts. The first model load can take minutes on a fresh install, and a\n" +
-                "first caller turn would otherwise hit the game's 15-second recognition timeout.\n" +
-                "Harmless when the server is not running: the failure is logged, not raised.");
+                "Load the Parakeet checkpoint (and Kokoro, if TTS is on) when the game starts, when the\n" +
+                "model files are already on disk. The first load of a 600 MB encoder takes a couple of\n" +
+                "seconds and a first caller turn would otherwise pay for it. Downloads are not started\n" +
+                "here: they wait for a turn that needs them.");
 
-            AutoStartServer = settings.Bind("2 - Server", "AutoStartServer", true,
-                "Start the companion server with the game if it is not already running.\n" +
-                "The server is looked for at BepInEx/plugins/VoiceBackend/VoiceBackend.Server.exe,\n" +
-                "then a few nearby folders. It is a self-contained executable: Python is not needed\n" +
-                "on the player's machine. A server already listening on BaseUrl is left alone.");
+            DeepgramUrl = settings.Bind("2 - Remote API", "DeepgramUrl", "https://api.deepgram.com",
+                "Deepgram base URL. Point it at a proxy or a regional endpoint if your traffic has to\n" +
+                "leave through one.");
 
-            ServerExecutable = settings.Bind("2 - Server", "ServerExecutable", "",
-                "Explicit path to VoiceBackend.Server.exe. Empty searches the usual places.\n" +
-                "A relative path is tried next to the plugins folder, then the game root.");
+            DeepgramApiKey = settings.Bind("2 - Remote API", "DeepgramApiKey", "",
+                "Deepgram API key, sent as 'Authorization: Token ...'. Stored in plain text in this\n" +
+                "file; the same key serves recognition and Aura speech.");
 
-            ServerStartTimeoutSeconds = settings.Bind("2 - Server", "ServerStartTimeoutSeconds", 300, 5, 900,
-                "How long to wait for the auto-started server to answer /health. The first launch of\n" +
-                "a bundled Python runtime can take a while on a cold disk.");
+            DeepgramSttModel = settings.Bind("2 - Remote API", "DeepgramSttModel", "nova-3",
+                "Deepgram recognition model, for example nova-3 or nova-2. Language is passed from the\n" +
+                "game's own language for that turn.");
 
-            StopServerOnExit = settings.Bind("2 - Server", "StopServerOnExit", true,
-                "Stop the server when the game exits, but only if this mod started it. A server that\n" +
-                "was already running before the game is never touched.");
+            DeepgramTtsVoice = settings.Bind("2 - Remote API", "DeepgramTtsVoice", "aura-2-thalia-en",
+                "Deepgram Aura voice. The voice decides the language: aura-2-thalia-en is English,\n" +
+                "aura-2-celeste-es Spanish, and so on.");
+
+            GladiaUrl = settings.Bind("2 - Remote API", "GladiaUrl", "https://api.gladia.io",
+                "Gladia base URL.");
+
+            GladiaApiKey = settings.Bind("2 - Remote API", "GladiaApiKey", "",
+                "Gladia API key, sent as 'x-gladia-key'. Stored in plain text in this file.");
+
+            ElevenLabsUrl = settings.Bind("2 - Remote API", "ElevenLabsUrl", "https://api.elevenlabs.io",
+                "ElevenLabs base URL. A proxy in front of it works as long as it passes the same paths.");
+
+            ElevenLabsApiKey = settings.Bind("2 - Remote API", "ElevenLabsApiKey", "",
+                "ElevenLabs API key, sent as 'xi-api-key'. Stored in plain text in this file.");
+
+            ElevenLabsVoiceId = settings.Bind("2 - Remote API", "ElevenLabsVoiceId",
+                "21m00Tcm4TlvDq8ikWAM",
+                "ElevenLabs voice id - the id from the voice's page, not its name.");
+
+            ElevenLabsModel = settings.Bind("2 - Remote API", "ElevenLabsModel", "eleven_multilingual_v2",
+                "ElevenLabs model id. eleven_multilingual_v2 covers 29 languages; eleven_turbo_v2_5 is\n" +
+                "cheaper and faster and covers 32, at a lower quality.");
+
+            OpenAiUrl = settings.Bind("2 - Remote API", "OpenAiUrl", "https://api.openai.com",
+                "Base URL for the OpenAI-shaped services. Point it at a local or self-hosted server to\n" +
+                "keep audio on your own machine.");
+
+            OpenAiApiKey = settings.Bind("2 - Remote API", "OpenAiApiKey", "",
+                "Bearer token for the OpenAI-shaped services. Stored in plain text in this file.");
+
+            OpenAiSttModel = settings.Bind("2 - Remote API", "OpenAiSttModel", "whisper-1",
+                "Transcription model name, for example whisper-1 or gpt-4o-mini-transcribe.");
+
+            OpenAiTtsModel = settings.Bind("2 - Remote API", "OpenAiTtsModel", "gpt-4o-mini-tts",
+                "Speech model name, for example gpt-4o-mini-tts or tts-1.");
+
+            OpenAiTtsVoice = settings.Bind("2 - Remote API", "OpenAiTtsVoice", "alloy",
+                "Voice name for the OpenAI-shaped speech service.");
 
             AsrEnabled = settings.Bind("3 - Speech recognition", "AsrEnabled", true,
                 "Replace Whisper with Parakeet. English uses EnglishModel, the languages Parakeet v3\n" +
@@ -170,32 +245,24 @@ namespace ScamWYF.VoiceBackend
                 "               noticeably worse where the model was never trained.");
 
             AsrFallbackToWhisper = settings.Bind("3 - Speech recognition", "FallbackToWhisper", true,
-                "If the Parakeet server fails, run the game's own Whisper for that request rather than\n" +
+                "If Parakeet fails, run the game's own Whisper for that request rather than\n" +
                 "throwing the turn away. The failure is still counted and logged.");
 
             TtsEnabled = settings.Bind("4 - Text to speech", "TtsEnabled", true,
-                "Replace the Pocket TTS provider with Chatterbox. Languages the game routes to Qwen or\n" +
+                "Replace the Pocket TTS provider with Kokoro. Languages the game routes to Qwen or\n" +
                 "MOSS instead (Chinese, Japanese, Russian when configured that way) are left alone,\n" +
                 "because this replaces Pocket, not every provider.");
 
-            TtsModel = settings.BindChoice("4 - Text to speech", "TtsModel", TtsModelMode.Auto,
-                new[] { TtsModelMode.Auto, TtsModelMode.Turbo, TtsModelMode.Multilingual },
-                "Which Chatterbox checkpoint the server should use.\n" +
-                "Auto         = Turbo for English, Chatterbox Multilingual V3 for other languages.\n" +
-                "Turbo        = always Chatterbox Turbo. It is English-only, so non-English lines are\n" +
-                "               spoken with an English accent.\n" +
-                "Multilingual = always Chatterbox Multilingual V3, which covers 23 languages.");
-
-            SkipPocketModel = settings.Bind("4 - Text to speech", "SkipPocketModel", true,
+            SkipPocketModel = settings.Bind("4 - Text to speech", "SkipPocketModel", false,
                 "Do not load the game's Pocket TTS ONNX models at all. The game still creates its\n" +
-                "PocketTTS component and emits frames through it, but the models never enter memory and\n" +
-                "Chatterbox provides every sample.\n" +
-                "Turn this off if you want TtsFallbackToPocket to work: fallback needs the real model.");
+                "PocketTTS component and emits frames through it, but the models never enter memory.\n" +
+                "Off by default because Kokoro is English-only here: a German or Spanish line has to go\n" +
+                "back to Pocket, and that needs the model loaded. Turn it on for an English-only group\n" +
+                "to save the memory and the load time.");
 
-            TtsFallbackToPocket = settings.Bind("4 - Text to speech", "FallbackToPocket", false,
-                "If the Chatterbox server fails, use the game's own Pocket TTS for that line. Requires\n" +
-                "SkipPocketModel = false. Off by default, because the failure is usually a server that\n" +
-                "is not running and the game recovers by letting the player type instead.");
+            TtsFallbackToPocket = settings.Bind("4 - Text to speech", "FallbackToPocket", true,
+                "If Kokoro cannot speak a line - wrong language, model missing, synthesis failed - let\n" +
+                "the game's own Pocket TTS say it instead. Requires SkipPocketModel = false.");
 
             SendVoiceAudio = settings.Bind("4 - Text to speech", "SendVoiceAudio", false,
                 "Send the reference voice WAV itself instead of its path. The bundled server runs on\n" +
@@ -240,7 +307,22 @@ namespace ScamWYF.VoiceBackend
         {
             Clamp(AsrTimeoutSeconds, settings.Int(AsrTimeoutSeconds, 1, 120));
             Clamp(TtsTimeoutSeconds, settings.Int(TtsTimeoutSeconds, 1, 600));
-            Clamp(ServerStartTimeoutSeconds, settings.Int(ServerStartTimeoutSeconds, 5, 900));
+
+            if (TtsActive && SkipPocketModel.Value && log != null)
+            {
+                if (TtsService.Value == Api.TtsService.Local)
+                {
+                    log.LogWarning("SkipPocketModel is on, so every line has to come from Kokoro - and the " +
+                                   "local backend only speaks English. A non-English line will have no " +
+                                   "voice. Turn SkipPocketModel off to let the game's Pocket TTS cover it.");
+                }
+                else if (TtsService.Value != Api.TtsService.Server)
+                {
+                    log.LogWarning("SkipPocketModel is on, so a failed " + TtsService.Value +
+                                   " request leaves the caller with no voice at all; turn it off if you want " +
+                                   "the game's Pocket TTS to answer when the service is down.");
+                }
+            }
 
             if (SkipPocketModel.Value && TtsFallbackToPocket.Value)
             {
@@ -272,17 +354,21 @@ namespace ScamWYF.VoiceBackend
             if (log == null) return;
 
             log.LogInfo(string.Format(
-                "In effect: server {0}, mode {8}, ASR {1} (English {2}, European {3}, other {4}), TTS {5} ({6}, " +
-                "skip Pocket model {7}).",
-                SafeUrl(),
-                AsrActive ? "Parakeet" : "off",
+                "In effect: ASR {0} (English {1}, European {2}, other {3}), TTS {4}, device {5}, " +
+                "skip Pocket model {6}, downloads {7}.",
+                AsrActive ? AsrService.Value.ToString() : "off",
                 EnglishModel.Value,
                 EuropeanModel.Value,
                 OtherLanguages.Value,
-                TtsActive ? "Chatterbox" : "off",
-                TtsModel.Value,
+                TtsActive ? TtsService.Value.ToString() : "off",
+                Mode.Value,
                 SkipPocketModel.Value ? "yes" : "no",
-                Mode.Value));
+                AutoDownload.Value ? "on" : "off"));
+
+            if (AsrService.Value == Api.SttService.Server || TtsService.Value == Api.TtsService.Server)
+            {
+                log.LogInfo("  server base URL: " + SafeUrl());
+            }
         }
 
         private string SafeUrl()

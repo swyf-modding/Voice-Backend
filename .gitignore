@@ -2,10 +2,8 @@ bin/
 obj/
 vendor/ScamWYF.Modding.Core/bin/
 vendor/ScamWYF.Modding.Core/obj/
-server/.venv/
-server/__pycache__/
-server/models/
-server/build/
-server/dist/
+__pycache__/
+tests/local/bin/
+tests/local/obj/
 *.user
 *.suo

@@ -5,20 +5,20 @@ on:
   pull_request:
 
 jobs:
-  python:
-    name: Server parses
+  tools:
+    name: Asset scripts parse
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Byte-compile the server and its entry points
+      - name: Byte-compile the asset builders
         run: |
-          python -m py_compile server/app.py
+          python -m py_compile tools/build-lexicon.py tools/export-inno.py
           python - <<'PY'
           import ast, pathlib
-          for path in pathlib.Path("server").glob("*.py"):
+          for path in pathlib.Path("tools").glob("*.py"):
               ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
               print("ok", path)
           PY

@@ -5,6 +5,7 @@ using BepInEx.Logging;
 using HarmonyLib;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using ScamWYF.VoiceBackend.Api;
 using ScamWYF.Modding.Core;
 using ScamWYF.Modding.Core.Ui;
 using UnityEngine.UIElements;
@@ -13,7 +14,7 @@ namespace ScamWYF.VoiceBackend
 {
     /// <summary>
     /// Replaces the game's Whisper speech recognition with Parakeet and its Pocket TTS provider with
-    /// Chatterbox, both through a small companion server.
+    /// Kokoro, both in this process.
     /// </summary>
     /// <remarks>
     /// Two game methods cover the whole feature:
@@ -22,7 +23,7 @@ namespace ScamWYF.VoiceBackend
     ///       The one place WhisperVcPipeline asks for a transcript. Parakeet answers it instead.
     ///
     ///   PocketTTS.PocketTTS.Prompt(text, voicePath, languageCode)
-    ///       The one place PocketTtsSingleton asks for a spoken line. Chatterbox answers it, and the
+    ///       The one place PocketTtsSingleton asks for a spoken line. Kokoro answers it, and the
     ///       returned clip is queued through PocketTTS's own frame pacer, so subtitles, cancellation,
     ///       speaker routing and tracked-completion reports all keep working.
     ///
@@ -39,6 +40,27 @@ namespace ScamWYF.VoiceBackend
 
         internal static ManualLogSource Log;
         internal static Config Cfg;
+
+        /// <summary>
+        /// Where the plugin's own files live: the models it downloads and the assets it ships
+        /// (inno-kokoro tuner, English lexicon). Resolved once, next to the assembly.
+        /// </summary>
+        internal static string PluginDirectory
+        {
+            get
+            {
+                if (_pluginDirectory == null)
+                {
+                    string assembly = typeof(Plugin).Assembly.Location;
+                    _pluginDirectory = string.IsNullOrEmpty(assembly)
+                        ? System.IO.Path.Combine(Environment.CurrentDirectory, "BepInEx", "plugins", "VoiceBackend")
+                        : System.IO.Path.Combine(System.IO.Path.GetDirectoryName(assembly), "VoiceBackend");
+                }
+                return _pluginDirectory;
+            }
+        }
+
+        private static string _pluginDirectory;
 
         private static string _health = "not checked";
         private static HarmonyMethod _asrPrefix;
@@ -82,7 +104,7 @@ namespace ScamWYF.VoiceBackend
 
         protected override void OnModUnload()
         {
-            ServerLauncher.Stop();
+            VoiceBackend.Shutdown();
             VoiceRuntime.Shutdown();
         }
 
@@ -140,7 +162,7 @@ namespace ScamWYF.VoiceBackend
                     typeof(global::PocketTTS.PocketTTS),
                     "Prompt",
                     new[] { typeof(string), typeof(string), typeof(string) },
-                    "speak Pocket TTS lines through Chatterbox",
+                    "speak Pocket TTS lines through Kokoro",
                     _ttsPrefix))
             {
                 ModLog.LogWarning("Text to speech will stay on the game's Pocket TTS: the method this " +
@@ -163,7 +185,7 @@ namespace ScamWYF.VoiceBackend
                 typeof(PocketTtsSingleton),
                 "WarmUpVoice",
                 new[] { typeof(string) },
-                "skip Pocket voice warm-up (Chatterbox needs no local voice)",
+                "skip Pocket voice warm-up (Kokoro clones from the reference clip)",
                 _warmUpPrefix);
 
             PatchCoordinator.TryPatch(
@@ -171,21 +193,21 @@ namespace ScamWYF.VoiceBackend
                 typeof(PocketTtsSingleton),
                 "IsVoiceReady",
                 new[] { typeof(string) },
-                "report every voice ready; Chatterbox clones from the same WAV",
+                "report every voice ready; Kokoro clones from the same WAV",
                 _voiceReadyPrefix);
 
             // PocketTtsSingleton gives a provider 30 seconds of silence before calling the line
-            // stalled. Chatterbox on a CPU can take longer than that to produce the first sample,
+            // stalled. Kokoro on a CPU can take longer than that to produce the first sample,
             // and cancelling there would throw away a line that is nearly ready.
             if (!PatchCoordinator.TryPatch(
                     this,
                     typeof(PocketTtsSingleton),
                     "HasSpeechStalled",
                     new[] { typeof(double), typeof(double), typeof(double), typeof(bool), typeof(bool) },
-                    "do not time a line out while Chatterbox is still synthesising it",
+                    "do not time a line out while Kokoro is still synthesising it",
                     _stalledPrefix))
             {
-                ModLog.LogWarning("Could not patch the TTS stall timer; a slow CPU-only Chatterbox " +
+                ModLog.LogWarning("Could not patch the TTS stall timer; a slow CPU-only Kokoro " +
                                   "may be cancelled after 30 seconds.");
             }
 
@@ -198,45 +220,81 @@ namespace ScamWYF.VoiceBackend
                 _slowTranscriptPrefix);
         }
 
-        /// <summary>Bring the server up if needed, then warm its models.</summary>
+        /// <summary>Build the backend, then load whatever the configuration says will be needed.</summary>
         private IEnumerator Bootstrap()
         {
-            bool ready = false;
-            yield return ServerLauncher.EnsureStarted(delegate (bool ok, string message)
-            {
-                ready = ok;
-                if (ok) ModLog.LogInfo("Voice backend server: " + message);
-                else ModLog.LogWarning("Voice backend server: " + message);
-            });
-
-            if (ready && Cfg.WarmupOnLoad.Value) yield return Warmup();
-            ModMenu.Refresh();
-        }
-
-        /// <summary>Load the models at game start so the first caller does not pay for it.</summary>
-        private IEnumerator Warmup()
-        {
-            string url;
             try
             {
-                var baseUrl = Cfg.BaseUrl.Value.Trim().TrimEnd('/');
-                var models = Cfg.AsrActive ? "v2,v3" : "none";
-                url = baseUrl + "/warmup?asr_model=" + models + "&do_tts=" + (Cfg.TtsActive ? "true" : "false");
+                VoiceBackend.Create();
+                ModLog.LogInfo("Voice backend: " + VoiceBackend.Describe());
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                ModLog.LogWarning("Could not build the voice backend: " + ex.Message);
+                ModMenu.Refresh();
                 yield break;
             }
 
-            HttpResult result = null;
-            yield return VoiceHttp.Post(url, new byte[0], "application/json", 5,
-                delegate (HttpResult r) { result = r; });
+            if (Cfg.WarmupOnLoad.Value) yield return VoiceBackend.WarmUp();
 
-            if (result != null && result.Ok)
-                ModLog.LogInfo("Asked the voice backend to load its models: " + result.Text);
-            else
-                ModLog.LogInfo("Voice backend warm-up skipped: " +
-                               (result != null ? result.Describe() : "no response"));
+            if (Environment.GetEnvironmentVariable("VOICEBACKEND_SELFTEST") == "1")
+            {
+                yield return SelfTest();
+            }
+
+            ModMenu.Refresh();
+        }
+
+        /// <summary>
+        /// End-to-end check of the local backend inside the game process: synthesise a known line,
+        /// feed the audio back into Parakeet, and log what came out. Run with
+        /// <c>VOICEBACKEND_SELFTEST=1</c> in the environment and no arguments beyond
+        /// <c>-batchmode -nographics</c>; it downloads whatever the configuration needs first.
+        /// </summary>
+        private IEnumerator SelfTest()
+        {
+            const string sentence = "The quick brown fox jumps over the lazy dog.";
+            ModLog.LogInfo("Self test: starting with " + VoiceBackend.Describe());
+
+            float[] audio = null;
+            int rate = 0;
+            string detail = null;
+            string error = null;
+            long started = Environment.TickCount;
+            yield return VoiceBackend.Synthesize(sentence, "en", null,
+                delegate (float[] samples, int sampleRate, string source)
+                {
+                    audio = samples;
+                    rate = sampleRate;
+                    detail = source;
+                },
+                delegate (string reason) { error = reason; });
+
+            if (error != null || audio == null || audio.Length == 0)
+            {
+                ModLog.LogError("Self test: synthesis failed: " + (error ?? "no audio"));
+                yield break;
+            }
+
+            ModLog.LogInfo(string.Format("Self test: {0} rendered {1:F2} s at {2} Hz in {3} ms", detail,
+                audio.Length / (double)rate, rate, Environment.TickCount - started));
+
+            float[] mono = WavCodec.ResampleMono(audio, rate, 16000);
+            string text = null;
+            error = null;
+            started = Environment.TickCount;
+            yield return VoiceBackend.Transcribe(mono, "en", Cfg.EnglishModel.Value,
+                delegate (string result, float confidence) { text = result; },
+                delegate (string reason) { error = reason; });
+
+            if (error != null)
+            {
+                ModLog.LogError("Self test: recognition failed: " + error);
+                yield break;
+            }
+
+            ModLog.LogInfo(string.Format("Self test: heard \"{0}\" ({1} ms) for \"{2}\"", text,
+                Environment.TickCount - started, sentence));
         }
 
         /// <summary>Forces the pipeline's non-Moonshine path while Parakeet is active.</summary>
@@ -253,10 +311,9 @@ namespace ScamWYF.VoiceBackend
         {
             var scroll = page;
 
-            Widgets.FieldRow(scroll, "Server", SafeUrl());
+            Widgets.FieldRow(scroll, "Backend", VoiceBackend.Describe());
             Widgets.FieldRow(scroll, "Device mode", Cfg.Mode.Value.ToString());
-            Widgets.FieldRow(scroll, "Server check", _health);
-            Widgets.FieldRow(scroll, "Server process", ServerLauncher.Status);
+            Widgets.FieldRow(scroll, "Models", _health);
 
             Widgets.Spacer(scroll, 8f);
             Widgets.Heading(scroll, "Speech recognition");
@@ -268,7 +325,8 @@ namespace ScamWYF.VoiceBackend
             }
             else
             {
-                Widgets.FieldRow(scroll, "Endpoint", SafeUrl(Cfg.AsrPath.Value));
+                if (Cfg.AsrService.Value == SttService.Server)
+                    Widgets.FieldRow(scroll, "Endpoint", SafeUrl(Cfg.AsrPath.Value));
                 Widgets.FieldRow(scroll, "English", "Parakeet " + LanguageMap.CodeFor(Cfg.EnglishModel.Value));
                 Widgets.FieldRow(scroll, "European", "Parakeet " + LanguageMap.CodeFor(Cfg.EuropeanModel.Value));
                 Widgets.FieldRow(scroll, "Other languages", Cfg.OtherLanguages.Value == OtherLanguageAsr.ParakeetV3
@@ -293,8 +351,9 @@ namespace ScamWYF.VoiceBackend
             }
             else
             {
-                Widgets.FieldRow(scroll, "Endpoint", SafeUrl(Cfg.TtsPath.Value));
-                Widgets.FieldRow(scroll, "Model", Cfg.TtsModel.Value.ToString());
+                if (Cfg.TtsService.Value == TtsService.Server)
+                    Widgets.FieldRow(scroll, "Endpoint", SafeUrl(Cfg.TtsPath.Value));
+                Widgets.FieldRow(scroll, "Model", "Kokoro 82M");
                 Widgets.FieldRow(scroll, "Pocket model", Cfg.SkipPocketModel.Value
                     ? "not loaded"
                     : "loaded (fallback available)");
@@ -309,27 +368,11 @@ namespace ScamWYF.VoiceBackend
             Widgets.Spacer(scroll, 6f);
 
             var row = Widgets.WrapRow(scroll);
-            Widgets.DescribedButton(row, "Check server", "Ask the companion server for /health", delegate
+            Widgets.DescribedButton(row, "Check models", "Report which model files are present and loaded", delegate
             {
                 _health = "checking...";
                 ModMenu.Refresh();
-                VoiceRuntime.Instance.StartCoroutine(CheckHealth());
-            });
-
-            Widgets.DescribedButton(row, "Start server", "Launch the bundled server now", delegate
-            {
-                VoiceRuntime.Instance.StartCoroutine(ServerLauncher.EnsureStarted(delegate (bool ok, string message)
-                {
-                    ModLog.LogInfo("Voice backend server: " + message);
-                    ModMenu.Refresh();
-                }));
-            });
-
-            Widgets.DescribedButton(row, "Stop server", "Stop a server this mod started", delegate
-            {
-                ServerLauncher.Stop(true);
-                ModLog.LogInfo("Voice backend server stopped from the menu.");
-                ModMenu.Refresh();
+                VoiceBackend.Check(delegate (string message) { _health = message; ModMenu.Refresh(); });
             });
 
             Widgets.DescribedButton(row, "Re-read config", "Reload the file now", delegate { ReloadConfig(); });
@@ -348,59 +391,6 @@ namespace ScamWYF.VoiceBackend
                 ". Editing that file while the game is running works too: it is watched, and the change " +
                 "is picked up within about half a second.");
             ConfigEditor.Build(body);
-        }
-
-        private IEnumerator CheckHealth()
-        {
-            string url;
-            try
-            {
-                var baseUrl = Cfg.BaseUrl.Value.Trim().TrimEnd('/');
-                url = baseUrl + "/health";
-            }
-            catch (Exception ex)
-            {
-                _health = "unreadable BaseUrl: " + ex.Message;
-                ModMenu.Refresh();
-                yield break;
-            }
-
-            HttpResult result = null;
-            yield return VoiceHttp.Get(url, 10, delegate (HttpResult r) { result = r; });
-
-            if (result != null && result.Ok && !string.IsNullOrEmpty(result.Text))
-            {
-                try
-                {
-                    var health = JObject.Parse(result.Text);
-                    var device = health["device"] as JObject;
-                    if (device != null)
-                    {
-                        _health = string.Format("torch={0} ({1}), asr={2}",
-                            device["torch"],
-                            device["torch_backend"],
-                            device["onnx_active"] != null
-                                ? device["onnx_active"].ToString(Formatting.None)
-                                : "?");
-                    }
-                    else
-                    {
-                        _health = Shorten(result.Text, 160);
-                    }
-                }
-                catch (Exception)
-                {
-                    _health = Shorten(result.Text, 160);
-                }
-                ModLog.LogInfo("Voice backend health: " + result.Text);
-            }
-            else
-            {
-                _health = result != null ? result.Describe() : "no response";
-                ModLog.LogWarning("Voice backend health check failed: " + _health);
-            }
-
-            ModMenu.Refresh();
         }
 
         private static string SafeUrl(string path = null)

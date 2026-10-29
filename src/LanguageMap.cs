@@ -99,6 +99,21 @@ namespace ScamWYF.VoiceBackend
             return "en";
         }
 
+        /// <summary>
+        /// Whether the local backend can speak this language.
+        /// </summary>
+        /// <remarks>
+        /// Kokoro's acoustic model covers eight languages, but the mod phonemises with an English
+        /// lexicon: its other seven go through espeak-ng in the reference implementation, which is a
+        /// GPL native library this mod will not bundle. So the local backend is English-only, and any
+        /// other language is left to the game's own provider rather than being spoken with an English
+        /// accent by accident.
+        /// </remarks>
+        public static bool KokoroSpeaks(string code)
+        {
+            return IsEnglish(code);
+        }
+
         public static bool ChatterboxSupports(string code)
         {
             return ChatterboxLanguages.Contains(Normalize(code));

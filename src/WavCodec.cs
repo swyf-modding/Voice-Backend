@@ -166,23 +166,55 @@ namespace ScamWYF.VoiceBackend
         }
 
         /// <summary>Plain linear resampling. Chatterbox already returns 24 kHz, so this is a guard.</summary>
+        /// <summary>
+        /// Sample-rate conversion with a windowed-sinc kernel.
+        /// </summary>
+        /// <remarks>
+        /// Linear interpolation is what this used to do, and decimating with it folds 8-12 kHz back
+        /// into 4-8 kHz: on a 24 kHz clip converted to 16 kHz it audibly damages exactly the
+        /// fricatives speech recognition reads first. Sixteen taps either side with a Hann window and
+        /// a cut-off at 45% of the lower Nyquist is short enough to be free here and clean enough that
+        /// a round trip through it does not change what a recogniser hears.
+        /// </remarks>
         public static float[] ResampleMono(float[] input, int fromRate, int toRate)
         {
             if (input == null || input.Length == 0 || fromRate <= 0 || toRate <= 0 || fromRate == toRate)
                 return input ?? new float[0];
 
-            var ratio = (double)fromRate / toRate;
-            var outputLength = Math.Max(1, (int)Math.Round(input.Length / ratio));
-            var output = new float[outputLength];
+            // Math.PI is stripped from the game's corlib, so the constant lives here.
+            const double Pi = 3.14159265358979323846;
+            const int Taps = 16;
+            double ratio = (double)fromRate / toRate;
+            double cutoff = 0.45 * (ratio > 1.0 ? 1.0 / ratio : 1.0);
+            int outputLength = Math.Max(1, (int)Math.Round(input.Length / ratio));
+            float[] output = new float[outputLength];
 
             for (int i = 0; i < outputLength; i++)
             {
-                var position = i * ratio;
-                var index = (int)position;
-                var fraction = position - index;
-                var a = input[Math.Min(index, input.Length - 1)];
-                var b = input[Math.Min(index + 1, input.Length - 1)];
-                output[i] = (float)(a + (b - a) * fraction);
+                double center = i * ratio;
+                int first = (int)Math.Floor(center) - Taps + 1;
+                double sum = 0;
+                double weight = 0;
+                for (int k = 0; k < 2 * Taps; k++)
+                {
+                    int index = first + k;
+                    if (index < 0) index = 0;
+                    else if (index >= input.Length) index = input.Length - 1;
+
+                    double distance = center - index;
+                    double x = distance / Taps;
+                    if (x <= -1.0 || x >= 1.0) continue;
+
+                    double sinc = distance == 0 ? 1.0 : Math.Sin(Pi * cutoff * distance) /
+                        (Pi * cutoff * distance);
+                    double window = 0.5 + 0.5 * Math.Cos(Pi * x);
+                    double w = sinc * window;
+
+                    sum += input[index] * w;
+                    weight += w;
+                }
+
+                output[i] = (float)(weight != 0 ? sum / weight : 0);
             }
 
             return output;

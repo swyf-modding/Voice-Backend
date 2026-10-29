@@ -64,7 +64,18 @@ if ($Test)      { $buildArgs.Test = $true }
 & $lib @buildArgs
 
 if (-not $NoCopy) {
+    # The assets are part of the mod, not a download: the inno-kokoro tuner graph, its blend tables and
+    # the English pronunciation lexicon. They live beside the plugin DLL, in the folder the release zip
+    # already uses, so the mod finds them without knowing where the game is.
+    $assets = Join-Path $PSScriptRoot 'assets'
+    if (Test-Path $assets) {
+        $target = Join-Path $GameDir 'BepInEx/plugins/VoiceBackend'
+        New-Item -ItemType Directory -Force -Path $target | Out-Null
+        Copy-Item -Recurse -Force (Join-Path $assets '*') $target
+        Write-Host ("Installed assets to " + $target) -ForegroundColor Green
+    }
+
     Write-Host ""
-    Write-Host "The mod starts the bundled server automatically." -ForegroundColor Green
-    Write-Host "If BepInEx/plugins/VoiceBackend is missing, build it with: server/build-server.ps1 -Install" -ForegroundColor Green
+    Write-Host "Models download into BepInEx/plugins/VoiceBackend/models on first use;" -ForegroundColor Green
+    Write-Host "Parakeet v2 is about 630 MB and Kokoro about 325 MB." -ForegroundColor Green
 }

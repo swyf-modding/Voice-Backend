@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Networking;
 
@@ -64,16 +65,28 @@ namespace ScamWYF.VoiceBackend
         public static IEnumerator Post(string url, byte[] payload, string contentType, int timeoutSeconds,
             Action<HttpResult> done)
         {
-            yield return Send(url, payload, contentType, timeoutSeconds, false, done);
+            yield return Send(url, payload, contentType, null, timeoutSeconds, false, done);
+        }
+
+        public static IEnumerator Post(string url, byte[] payload, string contentType,
+            IDictionary<string, string> headers, int timeoutSeconds, Action<HttpResult> done)
+        {
+            yield return Send(url, payload, contentType, headers, timeoutSeconds, false, done);
         }
 
         public static IEnumerator Get(string url, int timeoutSeconds, Action<HttpResult> done)
         {
-            yield return Send(url, null, null, timeoutSeconds, true, done);
+            yield return Send(url, null, null, null, timeoutSeconds, true, done);
         }
 
-        private static IEnumerator Send(string url, byte[] payload, string contentType, int timeoutSeconds,
-            bool get, Action<HttpResult> done)
+        public static IEnumerator Get(string url, IDictionary<string, string> headers, int timeoutSeconds,
+            Action<HttpResult> done)
+        {
+            yield return Send(url, null, null, headers, timeoutSeconds, true, done);
+        }
+
+        private static IEnumerator Send(string url, byte[] payload, string contentType,
+            IDictionary<string, string> headers, int timeoutSeconds, bool get, Action<HttpResult> done)
         {
             UnityWebRequest request = null;
             var result = new HttpResult();
@@ -87,14 +100,26 @@ namespace ScamWYF.VoiceBackend
                     request.uploadHandler = new UploadHandlerRaw(payload ?? new byte[0]);
                     request.SetRequestHeader("Content-Type", contentType ?? "application/octet-stream");
                 }
-                request.SetRequestHeader("Accept", "application/json, audio/wav, */*");
+                request.SetRequestHeader("Accept", "application/json, audio/wav, audio/pcm, */*");
                 request.timeout = Math.Max(1, timeoutSeconds);
 
-                var key = Plugin.Cfg != null ? Plugin.Cfg.ApiKey.Value.Trim() : "";
-                if (key.Length > 0) request.SetRequestHeader("Authorization", "Bearer " + key);
+                // A caller that names its own headers owns its authorization entirely; only the mod's
+                // own server falls back to the single shared key.
+                if (headers != null && headers.Count > 0)
+                {
+                    foreach (KeyValuePair<string, string> header in headers)
+                    {
+                        if (!string.IsNullOrEmpty(header.Value)) request.SetRequestHeader(header.Key, header.Value);
+                    }
+                }
+                else
+                {
+                    var key = Plugin.Cfg != null ? Plugin.Cfg.ApiKey.Value.Trim() : "";
+                    if (key.Length > 0) request.SetRequestHeader("Authorization", "Bearer " + key);
+                }
 
                 if (Plugin.Cfg != null && Plugin.Cfg.Debug.Value)
-                    Plugin.Log.LogInfo("-> " + (get ? "GET " : "POST ") + url + " (" +
+                    Plugin.Log.LogInfo("-> " + (get ? "GET " : "POST ") + Redact(url) + " (" +
                                        (payload != null ? payload.Length : 0) + " bytes)");
             }
             catch (Exception ex)
@@ -142,6 +167,33 @@ namespace ScamWYF.VoiceBackend
             }
 
             if (done != null) done(result);
+        }
+
+        /// <summary>
+        /// Strips anything that looks like a credential out of a URL before logging it. Some services
+        /// accept the key as a query parameter, and a debug log that leaks one is worse than no log.
+        /// </summary>
+        internal static string Redact(string url)
+        {
+            if (string.IsNullOrEmpty(url)) return "";
+            int query = url.IndexOf('?');
+            if (query < 0) return url;
+
+            string[] pairs = url.Substring(query + 1).Split('&');
+            for (int i = 0; i < pairs.Length; i++)
+            {
+                int equals = pairs[i].IndexOf('=');
+                if (equals <= 0) continue;
+                string name = pairs[i].Substring(0, equals);
+                if (name.IndexOf("key", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    name.IndexOf("token", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    name.IndexOf("secret", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    name.IndexOf("auth", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    pairs[i] = name + "=...";
+                }
+            }
+            return url.Substring(0, query + 1) + string.Join("&", pairs);
         }
     }
 }

@@ -99,7 +99,7 @@ namespace ScamWYF.VoiceBackend
             if (!_loggedSkip)
             {
                 _loggedSkip = true;
-                Plugin.Log.LogInfo("Skipping the Pocket TTS ONNX model; Chatterbox provides every sample.");
+                Plugin.Log.LogInfo("Skipping the Pocket TTS ONNX model; Kokoro provides every sample.");
             }
             return false;
         }
@@ -126,55 +126,25 @@ namespace ScamWYF.VoiceBackend
         {
             try
             {
-            var url = "";
-            byte[] payload = null;
-            string buildError = null;
+            float[] audio = null;
+            int rate = 0;
+            string detail = null;
+            string error = null;
 
-            try
+            if (Plugin.Cfg.Debug.Value)
             {
-                url = Plugin.Cfg.ResolveUrl(Plugin.Cfg.TtsPath);
-                var body = new JObject
-                {
-                    ["text"] = prompt,
-                    ["language"] = LanguageMap.ChatterboxLanguage(language),
-                    ["model"] = Plugin.Cfg.TtsModel.Value.ToString().ToLowerInvariant(),
-                    ["voice_path"] = resolvedVoice ?? ""
-                };
-
-                if (Plugin.Cfg.SendVoiceAudio.Value && !string.IsNullOrEmpty(resolvedVoice))
-                {
-                    try
-                    {
-                        body["voice_b64"] = Convert.ToBase64String(File.ReadAllBytes(resolvedVoice));
-                    }
-                    catch (Exception ex)
-                    {
-                        Plugin.Log.LogWarning("Could not read the reference voice '" + resolvedVoice + "': " + ex.Message);
-                    }
-                }
-
-                payload = Encoding.UTF8.GetBytes(body.ToString(Newtonsoft.Json.Formatting.None));
-
-                if (Plugin.Cfg.Debug.Value)
-                {
-                    Plugin.Log.LogInfo(string.Format("TTS {0} language={1} voice={2} chars={3} bytes={4}",
-                        Plugin.Cfg.TtsModel.Value, language, resolvedVoice, prompt.Length, payload.Length));
-                }
-            }
-            catch (Exception ex)
-            {
-                buildError = ex.Message;
+                Plugin.Log.LogInfo(string.Format("TTS Kokoro language={0} voice={1} chars={2}",
+                    language, resolvedVoice, prompt.Length));
             }
 
-            if (buildError != null)
-            {
-                FailOrFallBack(instance, prompt, originalVoicePath, language, "Could not build the request: " + buildError);
-                yield break;
-            }
-
-            HttpResult response = null;
-            yield return VoiceHttp.Post(url, payload, "application/json", Plugin.Cfg.TtsTimeoutSeconds.Value,
-                delegate (HttpResult result) { response = result; });
+            yield return VoiceBackend.Synthesize(prompt, language, resolvedVoice,
+                delegate (float[] samples, int sampleRate, string source)
+                {
+                    audio = samples;
+                    rate = sampleRate;
+                    detail = source;
+                },
+                delegate (string reason) { error = reason; });
 
             if (PocketBridge.Discarding(instance))
             {
@@ -182,42 +152,32 @@ namespace ScamWYF.VoiceBackend
                 yield break;
             }
 
-            if (response == null || !response.Ok)
+            if (error != null)
             {
-                var reason = response != null ? response.Describe() : "no response";
-                FailOrFallBack(instance, prompt, originalVoicePath, language, reason);
-                yield break;
-            }
-
-            float[] audio;
-            int rate;
-            try
-            {
-                audio = WavCodec.DecodeMono(response.Body, out rate);
-                audio = WavCodec.ResampleMono(audio, rate, WavCodec.PocketSampleRate);
-            }
-            catch (Exception ex)
-            {
-                FailOrFallBack(instance, prompt, originalVoicePath, language, "Unreadable WAV: " + ex.Message);
+                FailOrFallBack(instance, prompt, originalVoicePath, language, error);
                 yield break;
             }
 
             if (audio == null || audio.Length == 0)
             {
-                FailOrFallBack(instance, prompt, originalVoicePath, language, "Chatterbox returned no audio.");
+                FailOrFallBack(instance, prompt, originalVoicePath, language, "Kokoro returned no audio.");
                 yield break;
             }
 
-            if (PocketBridge.Discarding(instance))
+            try
             {
-                PocketBridge.Finish(instance);
+                audio = WavCodec.ResampleMono(audio, rate, WavCodec.PocketSampleRate);
+            }
+            catch (Exception ex)
+            {
+                FailOrFallBack(instance, prompt, originalVoicePath, language, "Could not resample: " + ex.Message);
                 yield break;
             }
 
             try
             {
                 PocketBridge.Emit(instance, audio, prompt);
-                Stats.TtsSuccess("Chatterbox " + Plugin.Cfg.TtsModel.Value + " (" + language + ", " +
+                Stats.TtsSuccess((detail ?? "Kokoro") + " (" + language + ", " +
                                  (audio.Length / (double)WavCodec.PocketSampleRate).ToString("F1") + "s)");
             }
             catch (Exception ex)
@@ -251,7 +211,7 @@ namespace ScamWYF.VoiceBackend
             string originalVoicePath, string language, string reason)
         {
             Stats.TtsFailure(reason);
-            Plugin.Log.LogWarning("Chatterbox request failed: " + reason);
+            Plugin.Log.LogWarning("Kokoro request failed: " + reason);
 
             var fallback = Plugin.Cfg.TtsFallbackToPocket.Value && !Plugin.Cfg.SkipPocketModel.Value;
             if (!fallback)
@@ -271,7 +231,7 @@ namespace ScamWYF.VoiceBackend
                     return;
                 }
 
-                Plugin.Log.LogInfo("Chatterbox failed; the stock Pocket TTS is speaking this line instead.");
+                Plugin.Log.LogInfo("Kokoro failed; the stock Pocket TTS is speaking this line instead.");
                 Stats.TtsSuccess("Pocket (fallback)");
             }
             catch (Exception ex)

@@ -1,0 +1,7 @@
+# Fixtures are checked in as data and read verbatim by the C# test harness: the WAVs and the
+# style tensor are compared against the port's output, and ids.txt/phonemes.txt are parsed
+# character by character. The repository-wide "text=auto eol=crlf" must not rewrite them.
+*.wav  binary
+*.bin  binary
+*.txt  text eol=lf
+*.json text eol=lf

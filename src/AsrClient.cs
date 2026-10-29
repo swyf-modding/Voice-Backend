@@ -83,53 +83,31 @@ namespace ScamWYF.VoiceBackend
 
             try
             {
-                var url = Plugin.Cfg.ResolveUrl(Plugin.Cfg.AsrPath) +
-                          "?language=" + Uri.EscapeDataString(language) +
-                          "&model=" + LanguageMap.CodeFor(model);
-                var payload = WavCodec.EncodePcm16(mono, SampleRate, 1);
-
                 if (Plugin.Cfg.Debug.Value)
                 {
-                    Plugin.Log.LogInfo(string.Format("ASR {0} language={1} audio={2:F2}s bytes={3}",
-                        model, language, mono.Length / (double)SampleRate, payload.Length));
+                    Plugin.Log.LogInfo(string.Format("ASR {0} language={1} audio={2:F2}s",
+                        model, language, mono.Length / (double)SampleRate));
                 }
 
-                VoiceRuntime.Instance.StartCoroutine(VoiceHttp.Post(url, payload, "audio/wav",
-                    Plugin.Cfg.AsrTimeoutSeconds.Value, delegate (HttpResult result)
+                VoiceRuntime.Instance.StartCoroutine(VoiceBackend.Transcribe(mono, language, model,
+                    delegate (string text, float confidence)
                     {
-                        if (!result.Ok)
+                        Stats.AsrSuccess("Parakeet " + LanguageMap.CodeFor(model) + " (" + language + ")");
+                        completion.TrySetResult(BuildResult(text, confidence, language, mono.Length));
+                    },
+                    delegate (string error)
+                    {
+                        Stats.AsrFailure(error);
+                        Plugin.Log.LogWarning("Parakeet failed: " + error);
+
+                        if (Plugin.Cfg.AsrFallbackToWhisper.Value)
                         {
-                            Stats.AsrFailure(result.Describe());
-                            Plugin.Log.LogWarning("Parakeet request failed: " + result.Describe());
-
-                            if (Plugin.Cfg.AsrFallbackToWhisper.Value)
-                            {
-                                FallBackToWhisper(instance, originalSamples, frequency, channels,
-                                    completion, result.Describe());
-                                return;
-                            }
-
-                            completion.TrySetException(new InvalidOperationException(
-                                "Parakeet speech recognition failed: " + result.Describe()));
+                            FallBackToWhisper(instance, originalSamples, frequency, channels, completion, error);
                             return;
                         }
 
-                        try
-                        {
-                            var body = JObject.Parse(result.Text ?? "{}");
-                            var text = (string)body["text"] ?? "";
-                            var confidence = body["confidence"] != null ? body["confidence"].Value<float>() : 1f;
-                            Stats.AsrSuccess("Parakeet " + LanguageMap.CodeFor(model) + " (" + language + ")");
-                            completion.TrySetResult(BuildResult(text, confidence, language, mono.Length));
-                        }
-                        catch (Exception ex)
-                        {
-                            Stats.AsrFailure(ex.Message);
-                            Plugin.Log.LogWarning("Could not read Parakeet's reply: " + ex.Message +
-                                                  " Body: " + Shorten(result.Text));
-                            completion.TrySetException(new InvalidOperationException(
-                                "Parakeet returned an unreadable reply: " + ex.Message));
-                        }
+                        completion.TrySetException(new InvalidOperationException(
+                            "Parakeet speech recognition failed: " + error));
                     }));
             }
             catch (Exception ex)

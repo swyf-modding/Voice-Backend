@@ -11,5 +11,8 @@
 *.py      text eol=lf
 *.toml    text eol=lf
 *.json    text eol=lf
+*.bin     binary
+*.onnx    binary
+*.wav     binary
 .gitignore text eol=crlf
 .gitattributes text eol=crlf
