@@ -51,7 +51,9 @@ namespace ScamWYF.VoiceBackend
             string asr = AsrIsLocal
                 ? "Parakeet v2" + (Plugin.Cfg.EuropeanModel.Value == ParakeetModel.V3 ? " + v3" : "")
                 : Plugin.Cfg.AsrService.Value.ToString();
-            string tts = TtsIsLocal ? "Kokoro" : Plugin.Cfg.TtsService.Value.ToString();
+            string tts = TtsIsLocal
+                ? "Kokoro" + (ModelStore.MissingAssetBytes() > 0 ? " (assets missing)" : "")
+                : Plugin.Cfg.TtsService.Value.ToString();
             return asr + " / " + tts;
         }
 
@@ -138,7 +140,9 @@ namespace ScamWYF.VoiceBackend
             if (!TtsIsLocal) return Plugin.Cfg.TtsService.Value + " (" + DescribeKey(Plugin.Cfg.TtsService.Value) + ")";
 
             long kokoro = ModelStore.MissingBytes("kokoro");
-            return "Kokoro " + (kokoro == 0 ? "on disk" : kokoro / 1048576L + " MB to fetch");
+            long assets = ModelStore.MissingAssetBytes();
+            return "Kokoro " + (kokoro == 0 ? "on disk" : kokoro / 1048576L + " MB to fetch") +
+                   ", assets " + (assets == 0 ? "present" : assets / 1048576L + " MB to fetch");
         }
 
         private static string DescribeKey(SttService service)
@@ -375,6 +379,15 @@ namespace ScamWYF.VoiceBackend
             {
                 failed("Kokoro does not speak '" + language + "' yet; this line needs the game's own voice.");
                 yield break;
+            }
+
+            // The tuner graph and the lexicon are part of the install, not of the model set, so they
+            // are fetched from this build's own release before Kokoro is asked to load.
+            if (ModelStore.MissingAssetBytes() > 0)
+            {
+                bool assets = false;
+                yield return ModelStore.EnsureAssets(failed, delegate { assets = true; });
+                if (!assets) yield break;
             }
 
             yield return Prepare("kokoro", failed);

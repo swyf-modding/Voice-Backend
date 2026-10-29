@@ -3,6 +3,7 @@ using System.Collections;
 using System.IO;
 using UnityEngine;
 using UnityEngine.Networking;
+using ScamWYF.Modding.Core;
 using ScamWYF.VoiceBackend.Local;
 
 namespace ScamWYF.VoiceBackend.Models
@@ -11,10 +12,14 @@ namespace ScamWYF.VoiceBackend.Models
     /// Downloads the model files the local backend needs, into the plugin's own folder.
     /// </summary>
     /// <remarks>
-    /// The mod ships code and small assets; the weights are gigabytes and are fetched on first use,
-    /// which is also what the previous companion server did. The difference is who fetches: this runs
-    /// in the game process on a coroutine, so there is no separate executable and no second copy of
-    /// ONNX Runtime on disk.
+    /// Two kinds of file arrive here. The weights are gigabytes and come from their public model
+    /// repositories. The mod's own assets - the clone tuner and the pronunciation lexicon, 37 MB
+    /// together - are published as assets of this mod's own release, because the catalogue installer
+    /// only copies the assemblies it knows about: a release zip with a data folder beside the DLLs
+    /// would install the code and none of the data, and it must work after a manual install too.
+    ///
+    /// Assets are pinned to the release this build came from, so a mod installed from v0.5.0 fetches
+    /// v0.5.0's assets and never a newer set the DLL was not built against.
     ///
     /// Downloads are atomic: a file is written as <c>.part</c> and renamed when complete, so an
     /// interrupted download is retried rather than loaded as a truncated model. A file whose length
@@ -96,6 +101,99 @@ namespace ScamWYF.VoiceBackend.Models
         internal static string Root
         {
             get { return Path.Combine(Plugin.PluginDirectory, "models"); }
+        }
+
+        private static string Release
+        {
+            get
+            {
+                return "https://github.com/swyf-modding/Voice-Backend/releases/download/v" +
+                       PluginBuildInfo.Version + "/";
+            }
+        }
+
+        /// <summary>
+        /// The mod's own runtime assets, published beside the DLL in its own release. Names are flat
+        /// because a GitHub release asset cannot carry a path; they land in the folders the code
+        /// expects.
+        /// </summary>
+        private static File[] Assets()
+        {
+            return new[]
+            {
+                new File
+                {
+                    Name = "inno/encoder.onnx", Url = Release + "inno-encoder.onnx", Size = 29692053
+                },
+                new File
+                {
+                    Name = "inno/tuner.bin", Url = Release + "inno-tuner.bin", Size = 5233403
+                },
+                new File
+                {
+                    Name = "inno/default-voice.bin", Url = Release + "inno-default-voice.bin", Size = 522240
+                },
+                new File
+                {
+                    Name = "g2p/en-lexicon.bin", Url = Release + "g2p-en-lexicon.bin", Size = 2555293
+                },
+            };
+        }
+
+        internal static long MissingAssetBytes()
+        {
+            File[] files = Assets();
+            long total = 0;
+            for (int i = 0; i < files.Length; i++)
+            {
+                if (!IsComplete(Path.Combine(Plugin.PluginDirectory, files[i].Name), files[i].Size))
+                {
+                    total += files[i].Size;
+                }
+            }
+            return total;
+        }
+
+        /// <summary>Fetches the mod's own assets. Yields while a download runs.</summary>
+        internal static IEnumerator EnsureAssets(Action<string> failed, Action done)
+        {
+            File[] files = Assets();
+            for (int i = 0; i < files.Length; i++)
+            {
+                File file = files[i];
+                string path = Path.Combine(Plugin.PluginDirectory, file.Name);
+                if (IsComplete(path, file.Size)) continue;
+
+                if (Plugin.Cfg != null && !Plugin.Cfg.AutoDownload.Value)
+                {
+                    failed("Missing " + path + " and automatic downloads are off.");
+                    yield break;
+                }
+
+                string directory = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+
+                Plugin.Log.LogInfo(string.Format("Downloading {0} ({1:F0} MB) to {2}", file.Name,
+                    file.Size / 1024.0 / 1024.0, directory));
+
+                string partial = path + ".part";
+                yield return Download(file.Url, partial);
+
+                var info = new FileInfo(partial);
+                if (!info.Exists || (file.Size > 0 && info.Length != file.Size))
+                {
+                    failed(string.Format("Download of {0} ended at {1} bytes, expected {2}. The release " +
+                                         "for version {3} may not have it; see {4}",
+                        file.Name, info.Exists ? info.Length : 0, file.Size, PluginBuildInfo.Version,
+                        Release));
+                    yield break;
+                }
+
+                if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+                System.IO.File.Move(partial, path);
+            }
+
+            if (done != null) done();
         }
 
         internal static File[] For(string model)

@@ -64,9 +64,11 @@ if ($Test)      { $buildArgs.Test = $true }
 & $lib @buildArgs
 
 if (-not $NoCopy) {
-    # The assets are part of the mod, not a download: the inno-kokoro tuner graph, its blend tables and
-    # the English pronunciation lexicon. They live beside the plugin DLL, in the folder the release zip
-    # already uses, so the mod finds them without knowing where the game is.
+    # A release ships two assemblies and nothing else, because the catalogue installer copies only the
+    # assemblies it was told about. The assets therefore travel as assets of the same GitHub release,
+    # and the mod fetches them on first use next to its models. They are copied here anyway, so a
+    # developer's first run does not spend 37 MB of bandwidth; the download path is what a player
+    # takes, and RELEASING.md says how to exercise it.
     $assets = Join-Path $PSScriptRoot 'assets'
     if (Test-Path $assets) {
         $target = Join-Path $GameDir 'BepInEx/plugins/VoiceBackend'

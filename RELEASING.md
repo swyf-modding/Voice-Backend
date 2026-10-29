@@ -1,37 +1,39 @@
 # Releasing
 
-A release is one folder: the mod DLL, the shared library, and the mod's assets. There is no server
-to build and no runtime to bundle — inference uses the ONNX Runtime the game already ships.
+A release is **two assemblies in a zip** plus **four asset files beside it**. Nothing else: the
+catalogue installer (Switchboard) copies only the assemblies an entry names, from the top of the
+download, so a release that nests anything it needs will install the code and none of the data.
 
 ## Layout
 
-The release zip unpacks to the game root with this shape:
+`Voice-Backend-<version>.zip` — flat, two files, no folders:
 
 ```text
-BepInEx/
-|-- core/
-|   `-- ScamWYF.Modding.Core.dll
-`-- plugins/
-    |-- ScamWYF.VoiceBackend.dll
-    `-- VoiceBackend/
-        |-- inno/encoder.onnx
-        |-- inno/tuner.bin
-        |-- inno/default-voice.bin
-        `-- g2p/en-lexicon.bin
+ScamWYF.VoiceBackend.dll      -> BepInEx/plugins
+ScamWYF.Modding.Core.dll      -> BepInEx/core
 ```
 
-`VoiceBackend/` is deliberately one folder below `plugins`: BepInEx scans only the top level of
-`plugins` for DLLs, and the mod resolves its assets and its downloaded models relative to that
-folder. `models/` is created there on first use and is never shipped.
+Four more files are uploaded to the same release, and the mod downloads them on first use into
+`BepInEx/plugins/VoiceBackend/{inno,g2p}/`:
+
+| Release asset | Installed as | Size |
+|---|---|---|
+| `inno-encoder.onnx` | `VoiceBackend/inno/encoder.onnx` | 29,692,053 B |
+| `inno-tuner.bin` | `VoiceBackend/inno/tuner.bin` | 5,233,403 B |
+| `inno-default-voice.bin` | `VoiceBackend/inno/default-voice.bin` | 522,240 B |
+| `g2p-en-lexicon.bin` | `VoiceBackend/g2p/en-lexicon.bin` | 2,555,293 B |
+
+Their names are flat because a release asset cannot carry a path. `ModelStore` composes the URL from
+`PluginBuildInfo.Version`, so a build fetches the assets of the release it came from and never a newer
+set it was not built against: the tag and the asset names have to agree, which is why the sizes are
+also in the catalog and a mismatch is an error rather than a truncated model.
 
 ## Build
 
 ```powershell
-./build.ps1 -Version 0.2.0                      # builds, installs the DLL and the assets
-./build.ps1 -NoCopy -Version 0.2.0              # build only
+./build.ps1 -Version 0.5.0            # builds, installs into the game, copies assets for local dev
+./build.ps1 -NoCopy -Version 0.5.0    # build only
 ```
-
-`build.ps1` copies `assets/` into `BepInEx/plugins/VoiceBackend/` next to the DLL.
 
 ### Assets
 
@@ -44,38 +46,49 @@ folder. `models/` is created there on first use and is never shipped.
 | `inno/default-voice.bin` | `python tools/export-inno.py` | kokoro-onnx release `model-files-v1.1`, `af_heart` |
 | `g2p/en-lexicon.bin` | `python tools/build-lexicon.py` | the English lexicons in the `misaki` package |
 
-Both scripts need a Python with `torch`, `safetensors`, `scipy`, `onnx` and `misaki[en]`; see the
-docstring at the top of each for the exact commands and the verification they run. `assets/` is
-about 36 MB, which is the only binary weight in the repository.
+Both scripts need a Python with `torch`, `safetensors`, `scipy`, `onnx` and `misaki[en]`; the docstring
+at the top of each has the exact commands and the verification they run.
 
 ## Package
 
 ```powershell
-$stage = "release/BepInEx"
-New-Item -ItemType Directory -Force "$stage/core", "$stage/plugins" | Out-Null
+./build.ps1 -Version 0.5.0
 
-Copy-Item "bin/ScamWYF.VoiceBackend.dll" "$stage/plugins/"
-Copy-Item "vendor/ScamWYF.Modding.Core/bin/ScamWYF.Modding.Core.dll" "$stage/core/"
-Copy-Item -Recurse -Force "assets/*" "$stage/plugins/VoiceBackend/"
+$stage = "release"
+Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force $stage | Out-Null
+Copy-Item "bin/ScamWYF.VoiceBackend.dll" $stage
+Copy-Item "vendor/ScamWYF.Modding.Core/bin/ScamWYF.Modding.Core.dll" $stage
 
-7z a -tzip -mx=5 "release/Voice-Backend-0.2.0.zip" "release/BepInEx/*"
+# Flat: two files at the root, nothing nested.
+tar -a -c -f "release/Voice-Backend-0.5.0.zip" -C $stage ScamWYF.VoiceBackend.dll ScamWYF.Modding.Core.dll
 ```
 
-The zip is a few hundred kilobytes of code and 36 MB of assets. Models are not in it: Parakeet v2
-(630 MB), Parakeet v3 (630 MB) and Kokoro (325 MB) are fetched from their public release URLs on
-first use, so they can be updated independently of the mod.
+Then publish, uploading the four asset files as well:
+
+```powershell
+gh release create v0.5.0 `
+    "release/Voice-Backend-0.5.0.zip" `
+    "assets/inno/encoder.onnx#inno-encoder.onnx" `
+    "assets/inno/tuner.bin#inno-tuner.bin" `
+    "assets/inno/default-voice.bin#inno-default-voice.bin" `
+    "assets/g2p/en-lexicon.bin#g2p-en-lexicon.bin" `
+    --title v0.5.0 --notes-file RELEASE-NOTES.md
+```
+
+`gh` treats `path#name` as "upload this file under that name", which is how a folder becomes a flat
+asset name.
 
 ## Checklist
 
 - [ ] `./build.ps1 -NoCopy -Test` passes.
-- [ ] The tag is on the commit that produced the DLL; `build.ps1` stamps the version from it.
-- [ ] The zip contains `BepInEx/plugins/VoiceBackend/{inno,g2p}` with all four files.
-- [ ] A clean install with no `models/` folder recognises a first English line, downloads Parakeet v2
-      and Kokoro, and speaks and transcribes it.
-- [ ] The menu's **Check models** reports the three model folders and what is missing, and describes
-      a configured speech service instead of calling it.
+- [ ] The tag is on the commit that produced the DLL, and `-Version` matches the tag.
+- [ ] `tar -tf Voice-Backend-<version>.zip` lists exactly two files, both at the root.
+- [ ] The release has all five files: the zip plus the four assets above.
+- [ ] On a machine with no `BepInEx/plugins/VoiceBackend` folder, the first English line downloads
+      Kokoro, Parakeet and the four assets, and speaks and transcribes. `Check models` in the menu
+      reports `assets present` afterwards.
+- [ ] `Mode = Gpu` on a DirectML machine logs the fallback and keeps working.
 - [ ] With `tools/service-stub.ps1` running, each of Deepgram, Gladia and OpenAi as `AsrService` and
       each of ElevenLabs, Deepgram and OpenAi as `TtsService` completes the `VOICEBACKEND_SELFTEST=1`
       round trip, and the stub log shows the right authorization header and multipart file part.
-- [ ] `BepInEx/LogOutput.log` names the DirectML provider when `Mode = Gpu` on a machine that has one.
-- [ ] No model files and no `models/` folder are in the zip or the repository.

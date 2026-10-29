@@ -127,9 +127,16 @@ code and a few small assets; the weights are downloaded once.
 | inno-kokoro tuner | `encoder.onnx`, `tuner.bin`, `default-voice.bin` | 30 MB | `remsky/kokoro-inno-clone-tuner` v0.2.0, converted by `tools/export-inno.py` |
 | English lexicon | `en-lexicon.bin` | 2.4 MB | the `misaki` package's IPA dictionaries, packed by `tools/build-lexicon.py` |
 
-Downloads go to `BepInEx/plugins/VoiceBackend/models/<model>/`, one folder per model, written as
-`.part` and renamed when the byte length matches the catalog. `AutoDownload = false` turns that off
-for a hand-placed folder.
+Weights go to `BepInEx/plugins/VoiceBackend/models/<model>/`; the last two rows are the mod's own
+assets and go to `VoiceBackend/{inno,g2p}/`. Both are written as `.part` and renamed when the byte
+length matches the catalog, and `AutoDownload = false` turns the fetching off for a hand-placed
+folder.
+
+The tuner and the lexicon are published as assets of this mod's own GitHub release rather than as
+part of the release zip. That is not an accident of packaging: the installers this mod ships through
+copy the assemblies an entry names and nothing else, so data inside the zip would never reach the
+disk. They are fetched from the release matching this build's version, so a DLL never loads a newer
+set of assets than the one it was compiled and tested against.
 
 **Speech recognition** is Parakeet TDT, decoded the way the model wants: `nemo128.onnx` produces the
 log-mel features, the conformer encoder runs once per clip, and the joint network then emits a token
