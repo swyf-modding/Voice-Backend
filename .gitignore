@@ -3,6 +3,7 @@ obj/
 vendor/ScamWYF.Modding.Core/bin/
 vendor/ScamWYF.Modding.Core/obj/
 __pycache__/
+release/
 tests/local/bin/
 tests/local/obj/
 *.user
