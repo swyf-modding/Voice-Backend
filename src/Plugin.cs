@@ -1,5 +1,8 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
+using System.Reflection;
+using System.Threading.Tasks;
 using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
@@ -84,7 +87,7 @@ namespace ScamWYF.VoiceBackend
             WatchConfig();
             ModMenu.AddPage(this, "Voice Backend", BuildPage, -20);
 
-            _asrPrefix = new HarmonyMethod(AccessTools.Method(typeof(AsrClient), nameof(AsrClient.Prefix)));
+            _asrPrefix = new HarmonyMethod(AccessTools.Method(typeof(AsrClient), nameof(AsrClient.PrefixDynamic)));
             _forceWhisperPrefix = new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(ForceWhisper)));
             _ttsPrefix = new HarmonyMethod(AccessTools.Method(typeof(TtsClient), nameof(TtsClient.PromptPrefix)));
             _initPrefix = new HarmonyMethod(AccessTools.Method(typeof(TtsClient), nameof(TtsClient.InitModelPrefix)));
@@ -127,14 +130,8 @@ namespace ScamWYF.VoiceBackend
 
         private void InstallAsr()
         {
-            if (!PatchCoordinator.TryPatch(
-                    this,
-                    typeof(Whisper.WhisperManager),
-                    "GetTextAsync",
-                    new[] { typeof(float[]), typeof(int), typeof(int) },
-                    "answer Whisper with Parakeet (" + LanguageMap.CodeFor(Cfg.EnglishModel.Value) + "/" +
-                    LanguageMap.CodeFor(Cfg.EuropeanModel.Value) + ")",
-                    _asrPrefix))
+            int patched = PatchAsrMethods();
+            if (patched == 0)
             {
                 ModLog.LogWarning("Speech recognition will stay on the game's Whisper: the method this " +
                                   "mod patches is not in this build.");
@@ -153,6 +150,83 @@ namespace ScamWYF.VoiceBackend
                 ModLog.LogWarning("Could not disable Moonshine; on a machine where the game prefers it, " +
                                   "speech recognition may not go through Parakeet.");
             }
+        }
+
+        private int PatchAsrMethods()
+        {
+            int patched = 0;
+            var seen = new HashSet<MethodBase>();
+
+            foreach (var target in AsrTargets())
+            {
+                if (target == null || !seen.Add(target)) continue;
+
+                if (PatchCoordinator.TryPatch(
+                        this,
+                        target,
+                        "answer speech recognition with Parakeet (" + LanguageMap.CodeFor(Cfg.EnglishModel.Value) + "/" +
+                        LanguageMap.CodeFor(Cfg.EuropeanModel.Value) + ")",
+                        _asrPrefix))
+                {
+                    patched++;
+                }
+            }
+
+            return patched;
+        }
+
+        private static IEnumerable<MethodBase> AsrTargets()
+        {
+            var manager = typeof(Whisper.WhisperManager);
+            var assembly = manager.Assembly;
+            Type[] types;
+            try
+            {
+                types = assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException ex)
+            {
+                types = ex.Types;
+            }
+
+            if (types == null) yield break;
+
+            for (int i = 0; i < types.Length; i++)
+            {
+                var type = types[i];
+                if (type == null) continue;
+
+                MethodInfo[] methods;
+                try
+                {
+                    methods = type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
+                                              BindingFlags.Instance | BindingFlags.Static);
+                }
+                catch (Exception)
+                {
+                    continue;
+                }
+
+                for (int j = 0; j < methods.Length; j++)
+                {
+                    var method = methods[j];
+                    if (!IsAsrTarget(method)) continue;
+                    yield return method;
+                }
+            }
+        }
+
+        private static bool IsAsrTarget(MethodInfo method)
+        {
+            if (method == null) return false;
+            if (!string.Equals(method.Name, "GetTextAsync", StringComparison.Ordinal)) return false;
+            if (method.ReturnType != typeof(Task<Whisper.WhisperResult>)) return false;
+
+            var args = method.GetParameters();
+            if (args.Length < 3) return false;
+            return args[0].ParameterType == typeof(float[]) &&
+                   args[1].ParameterType == typeof(int) &&
+                   args[2].ParameterType == typeof(int);
         }
 
         private void InstallTts()
