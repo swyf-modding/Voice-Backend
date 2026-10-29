@@ -1,5 +1,8 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
+using System.Reflection;
+using System.Threading.Tasks;
 using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
@@ -20,7 +23,9 @@ namespace ScamWYF.VoiceBackend
     /// Two game methods cover the whole feature:
     ///
     ///   Whisper.WhisperManager.GetTextAsync(samples, frequency, channels)
-    ///       The one place WhisperVcPipeline asks for a transcript. Parakeet answers it instead.
+    ///       The one place WhisperVcPipeline asks for a transcript. Parakeet answers it instead. Every
+    ///       GetTextAsync the manager declares with that audio shape is patched, because a game build
+    ///       may add parameters to it without changing what the call means.
     ///
     ///   PocketTTS.PocketTTS.Prompt(text, voicePath, languageCode)
     ///       The one place PocketTtsSingleton asks for a spoken line. Kokoro answers it, and the
@@ -84,7 +89,7 @@ namespace ScamWYF.VoiceBackend
             WatchConfig();
             ModMenu.AddPage(this, "Voice Backend", BuildPage, -20);
 
-            _asrPrefix = new HarmonyMethod(AccessTools.Method(typeof(AsrClient), nameof(AsrClient.Prefix)));
+            _asrPrefix = new HarmonyMethod(AccessTools.Method(typeof(AsrClient), nameof(AsrClient.PrefixDynamic)));
             _forceWhisperPrefix = new HarmonyMethod(AccessTools.Method(typeof(Plugin), nameof(ForceWhisper)));
             _ttsPrefix = new HarmonyMethod(AccessTools.Method(typeof(TtsClient), nameof(TtsClient.PromptPrefix)));
             _initPrefix = new HarmonyMethod(AccessTools.Method(typeof(TtsClient), nameof(TtsClient.InitModelPrefix)));
@@ -127,14 +132,8 @@ namespace ScamWYF.VoiceBackend
 
         private void InstallAsr()
         {
-            if (!PatchCoordinator.TryPatch(
-                    this,
-                    typeof(Whisper.WhisperManager),
-                    "GetTextAsync",
-                    new[] { typeof(float[]), typeof(int), typeof(int) },
-                    "answer Whisper with Parakeet (" + LanguageMap.CodeFor(Cfg.EnglishModel.Value) + "/" +
-                    LanguageMap.CodeFor(Cfg.EuropeanModel.Value) + ")",
-                    _asrPrefix))
+            int patched = PatchAsrMethods();
+            if (patched == 0)
             {
                 ModLog.LogWarning("Speech recognition will stay on the game's Whisper: the method this " +
                                   "mod patches is not in this build.");
@@ -153,6 +152,75 @@ namespace ScamWYF.VoiceBackend
                 ModLog.LogWarning("Could not disable Moonshine; on a machine where the game prefers it, " +
                                   "speech recognition may not go through Parakeet.");
             }
+        }
+
+        private int PatchAsrMethods()
+        {
+            int patched = 0;
+            var seen = new HashSet<MethodBase>();
+
+            foreach (var target in AsrTargets())
+            {
+                if (target == null || !seen.Add(target)) continue;
+
+                if (PatchCoordinator.TryPatch(
+                        this,
+                        target,
+                        "answer speech recognition with Parakeet (" + LanguageMap.CodeFor(Cfg.EnglishModel.Value) + "/" +
+                        LanguageMap.CodeFor(Cfg.EuropeanModel.Value) + ")",
+                        _asrPrefix))
+                {
+                    patched++;
+                }
+            }
+
+            return patched;
+        }
+
+        /// <summary>
+        /// Every <c>WhisperManager.GetTextAsync</c> that takes audio first: the manager is the only type
+        /// this patch answers, but which overloads it declares is the game's business.
+        /// </summary>
+        /// <remarks>
+        /// The scan stops at <c>WhisperManager</c> on purpose. WhisperWrapper declares a matching
+        /// <c>GetTextAsync(float[], int, int, WhisperParams)</c>, and the manager calls it - so patching
+        /// the assembly would answer that call too, and the wrapper carries no language of its own: the
+        /// prefix would read null, take it for English and answer a language the player had explicitly
+        /// left to Whisper. Trailing parameters, on the other hand, are exactly the drift this scan
+        /// exists to survive, so an overload may have any number of them.
+        /// </remarks>
+        private static IEnumerable<MethodBase> AsrTargets()
+        {
+            MethodInfo[] methods;
+            try
+            {
+                methods = typeof(Whisper.WhisperManager).GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
+                                                                    BindingFlags.Instance);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("Could not enumerate the recognizer's methods: " + ex.Message);
+                yield break;
+            }
+
+            for (int i = 0; i < methods.Length; i++)
+            {
+                if (!IsAsrTarget(methods[i])) continue;
+                yield return methods[i];
+            }
+        }
+
+        private static bool IsAsrTarget(MethodInfo method)
+        {
+            if (method == null) return false;
+            if (!string.Equals(method.Name, "GetTextAsync", StringComparison.Ordinal)) return false;
+            if (method.ReturnType != typeof(Task<Whisper.WhisperResult>)) return false;
+
+            var args = method.GetParameters();
+            if (args.Length < 3) return false;
+            return args[0].ParameterType == typeof(float[]) &&
+                   args[1].ParameterType == typeof(int) &&
+                   args[2].ParameterType == typeof(int);
         }
 
         private void InstallTts()

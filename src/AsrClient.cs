@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using Whisper;
@@ -25,13 +26,21 @@ namespace ScamWYF.VoiceBackend
 
         [ThreadStatic] private static bool _bypass;
 
-        public static bool Prefix(WhisperManager __instance, float[] samples, int frequency, int channels,
+        public static bool PrefixDynamic(object __instance, MethodBase __originalMethod, object[] __args,
             ref Task<WhisperResult> __result)
         {
             if (_bypass) return true;
             if (Plugin.Cfg == null || !Plugin.Cfg.AsrActive) return true;
 
-            var language = LanguageMap.Normalize(__instance != null ? __instance.language : null);
+            if (__args == null || __args.Length < 3) return true;
+            var samples = __args[0] as float[];
+            if (samples == null) return true;
+
+            int frequency;
+            int channels;
+            if (!TryReadInt(__args[1], out frequency) || !TryReadInt(__args[2], out channels)) return true;
+
+            var language = LanguageMap.Normalize(ReadLanguage(__instance));
             ParakeetModel? chosen;
             try { chosen = LanguageMap.ModelFor(language, Plugin.Cfg); }
             catch (Exception ex)
@@ -72,12 +81,12 @@ namespace ScamWYF.VoiceBackend
             }
 
             Stats.AsrRequest();
-            __result = Request(__instance, samples, frequency, channels, mono, language, chosen.Value);
+            __result = Request(__instance, __originalMethod, __args, mono, language, chosen.Value);
             return false;
         }
 
-        private static Task<WhisperResult> Request(WhisperManager instance, float[] originalSamples,
-            int frequency, int channels, float[] mono, string language, ParakeetModel model)
+        private static Task<WhisperResult> Request(object instance, MethodBase originalMethod, object[] originalArgs,
+            float[] mono, string language, ParakeetModel model)
         {
             var completion = new TaskCompletionSource<WhisperResult>();
 
@@ -102,7 +111,7 @@ namespace ScamWYF.VoiceBackend
 
                         if (Plugin.Cfg.AsrFallbackToWhisper.Value)
                         {
-                            FallBackToWhisper(instance, originalSamples, frequency, channels, completion, error);
+                            FallBackToWhisper(instance, originalMethod, originalArgs, completion, error);
                             return;
                         }
 
@@ -119,8 +128,8 @@ namespace ScamWYF.VoiceBackend
             return completion.Task;
         }
 
-        private static void FallBackToWhisper(WhisperManager instance, float[] samples, int frequency,
-            int channels, TaskCompletionSource<WhisperResult> completion, string reason)
+        private static void FallBackToWhisper(object instance, MethodBase originalMethod, object[] originalArgs,
+            TaskCompletionSource<WhisperResult> completion, string reason)
         {
             Stats.AsrFallback(reason);
             Plugin.Log.LogWarning("Falling back to the game's Whisper for this request.");
@@ -129,7 +138,7 @@ namespace ScamWYF.VoiceBackend
             try
             {
                 _bypass = true;
-                fallback = instance.GetTextAsync(samples, frequency, channels);
+                fallback = originalMethod.Invoke(instance, originalArgs) as Task<WhisperResult>;
             }
             catch (Exception ex)
             {
@@ -178,6 +187,59 @@ namespace ScamWYF.VoiceBackend
 
             var result = new WhisperResult(segments, 0);
             return result;
+        }
+
+        private static string ReadLanguage(object instance)
+        {
+            if (instance == null) return null;
+
+            try
+            {
+                var type = instance.GetType();
+                var field = type.GetField("language", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (field != null)
+                {
+                    var value = field.GetValue(instance) as string;
+                    if (!string.IsNullOrEmpty(value)) return value;
+                }
+
+                var property = type.GetProperty("language", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (property != null && property.PropertyType == typeof(string))
+                {
+                    var value = property.GetValue(instance, null) as string;
+                    if (!string.IsNullOrEmpty(value)) return value;
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("Could not read recognizer language: " + ex.Message);
+            }
+
+            return null;
+        }
+
+        private static bool TryReadInt(object value, out int number)
+        {
+            if (value is int)
+            {
+                number = (int)value;
+                return true;
+            }
+
+            if (value is long)
+            {
+                number = (int)(long)value;
+                return true;
+            }
+
+            if (value is short)
+            {
+                number = (short)value;
+                return true;
+            }
+
+            number = 0;
+            return false;
         }
 
         private static string Shorten(string text)

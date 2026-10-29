@@ -90,6 +90,13 @@ it asks a `WhisperManager` for text. This mod replaces only that answer: the pre
 16 kHz mono, runs the selected Parakeet checkpoint in-process on a worker thread, and returns a
 `WhisperResult` built from the text.
 
+Every `GetTextAsync` the manager declares that takes `(float[] samples, int frequency, int channels)`
+first is patched, and the prefix reads its arguments through the call's own signature rather than a
+fixed one. A game build that adds parameters to the method therefore keeps working; one that removes
+the method logs that recognition stays on Whisper. The native `WhisperWrapper` is deliberately left
+alone: it carries no language of its own, so answering it would also answer a language the player
+had left to Whisper.
+
 The game also has a second recognizer, **Moonshine**, which on some machines it prefers and which
 would bypass the Whisper method entirely. While Parakeet is active, `WindowsSpeechCompatibility.UseMoonshine`
 is forced to `false`, so recognition stays on the path this mod answers. If Parakeet fails (a model
