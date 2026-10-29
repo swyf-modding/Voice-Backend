@@ -23,7 +23,9 @@ namespace ScamWYF.VoiceBackend
     /// Two game methods cover the whole feature:
     ///
     ///   Whisper.WhisperManager.GetTextAsync(samples, frequency, channels)
-    ///       The one place WhisperVcPipeline asks for a transcript. Parakeet answers it instead.
+    ///       The one place WhisperVcPipeline asks for a transcript. Parakeet answers it instead. Every
+    ///       GetTextAsync the manager declares with that audio shape is patched, because a game build
+    ///       may add parameters to it without changing what the call means.
     ///
     ///   PocketTTS.PocketTTS.Prompt(text, voicePath, languageCode)
     ///       The one place PocketTtsSingleton asks for a spoken line. Kokoro answers it, and the
@@ -175,44 +177,36 @@ namespace ScamWYF.VoiceBackend
             return patched;
         }
 
+        /// <summary>
+        /// Every <c>WhisperManager.GetTextAsync</c> that takes audio first: the manager is the only type
+        /// this patch answers, but which overloads it declares is the game's business.
+        /// </summary>
+        /// <remarks>
+        /// The scan stops at <c>WhisperManager</c> on purpose. WhisperWrapper declares a matching
+        /// <c>GetTextAsync(float[], int, int, WhisperParams)</c>, and the manager calls it - so patching
+        /// the assembly would answer that call too, and the wrapper carries no language of its own: the
+        /// prefix would read null, take it for English and answer a language the player had explicitly
+        /// left to Whisper. Trailing parameters, on the other hand, are exactly the drift this scan
+        /// exists to survive, so an overload may have any number of them.
+        /// </remarks>
         private static IEnumerable<MethodBase> AsrTargets()
         {
-            var manager = typeof(Whisper.WhisperManager);
-            var assembly = manager.Assembly;
-            Type[] types;
+            MethodInfo[] methods;
             try
             {
-                types = assembly.GetTypes();
+                methods = typeof(Whisper.WhisperManager).GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
+                                                                    BindingFlags.Instance);
             }
-            catch (ReflectionTypeLoadException ex)
+            catch (Exception ex)
             {
-                types = ex.Types;
+                Plugin.Log.LogWarning("Could not enumerate the recognizer's methods: " + ex.Message);
+                yield break;
             }
 
-            if (types == null) yield break;
-
-            for (int i = 0; i < types.Length; i++)
+            for (int i = 0; i < methods.Length; i++)
             {
-                var type = types[i];
-                if (type == null) continue;
-
-                MethodInfo[] methods;
-                try
-                {
-                    methods = type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
-                                              BindingFlags.Instance | BindingFlags.Static);
-                }
-                catch (Exception)
-                {
-                    continue;
-                }
-
-                for (int j = 0; j < methods.Length; j++)
-                {
-                    var method = methods[j];
-                    if (!IsAsrTarget(method)) continue;
-                    yield return method;
-                }
+                if (!IsAsrTarget(methods[i])) continue;
+                yield return methods[i];
             }
         }
 
